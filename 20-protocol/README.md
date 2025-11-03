@@ -14,6 +14,7 @@ Protocol files follow this format: `YYYYMMDD_Meeting-XX.md`
 | Date | # | Type | Key Topics |
 |------|---|------|------------|
 | 2025-10-27 | [01](20251027_Meeting-01.md) | Supervisor | Lightning Talk format, Research directions, Repository structure |
+| 2025-11-03 | [02](20251103_Meeting-02.md) | Supervisor | Paper selection (Jolt vs Post-Quantum), DPI research direction, Backup planning |
 
 ## Protocol Template
 
