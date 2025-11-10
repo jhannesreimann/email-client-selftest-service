@@ -1,5 +1,9 @@
 # PQC Fingerprinting (arXiv:2503.17830v1) - Project Summary
 
+## TLDR
+
+Post-quantum cryptography (PQC) algorithms can be fingerprinted through resource usage and network signatures. ML models achieve 98-100% accuracy distinguishing classical vs. PQ crypto using memory metrics. Network analysis reveals PQ keys are exponentially larger (1000+ bytes vs. 32 bytes), making them trivially identifiable in TLS handshakes. Authors found 4,988 IPs supporting PQC in Tranco 1M. Two recreation paths: (1) ML-based library fingerprinting using resource monitoring, or (2) simpler network traffic analysis. Extension opportunities: test ECH defenses, re-run Tranco scans to measure PQC adoption growth, or analyze signature fragmentation.
+
 This document summarizes the findings of the paper "Fingerprinting Implementations of Cryptographic Primitives and Protocols that Use Post-Quantum Algorithms" and outlines a potential recreation plan for our project.
 
 ---

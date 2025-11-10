@@ -1,5 +1,9 @@
 # Email Auto-Detect Vulnerabilities (NDSS 2025) - Project Summary
 
+## TLDR
+
+Email clients' auto-detect feature is critically vulnerable to downgrade attacks. Testing 49 clients revealed 14 with exploitable flaws allowing attackers to strip TLS encryption and capture credentials in plaintext via STARTTLS manipulation. The attack exploits race conditions in concurrent port probing and flawed fallback logic. Highly reproducible using open-source tools (Postfix, Dovecot, mitmproxy). Strong project potential: test 2025 client versions, analyze real-world setup guides, and demonstrate practical credential theft through MITM attacks.
+
 This document summarizes the findings of the paper "A Multifaceted Study on the Use of TLS and Auto-detect in Email Ecosystems" and outlines a potential recreation plan for our project.
 
 ---
