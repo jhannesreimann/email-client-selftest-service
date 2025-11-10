@@ -79,7 +79,7 @@ A simple recreation of Path B (Sec. 4) is "trivial" (as we discussed). To make i
 ## 4. Advantages and Disadvantages
 
 ### ✅ Advantages
-* **Source Code is Available:** This is the biggest advantage. The authors provide all their data collection scripts, analysis code, and ML models in an anonymous repository. This saves us weeks of work.
+* **Source Code is Available:** This is the biggest advantage. The authors provide all their data collection scripts, analysis code, and ML models in an anonymous repository. This saves us weeks of work. (https://anonymous.4open.science/r/Fingerprint-809D/README.md)
 * **Two Clear Paths:** The project is flexible. We can choose the more complex ML-focused project (Sec. 3) or the more straightforward networking project (Sec. 4).
 * **High Feasibility:** Both paths are highly achievable within a semester. The tools (`liboqs`, `Wireshark`, `perf`) are all open-source and well-documented.
 * **Highly Relevant:** PQC migration is one of the most important topics in network security *right now*.
