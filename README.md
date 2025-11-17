@@ -1,9 +1,23 @@
 # Network Security in Practice 2025 - Team 2
-## TLS Project Repository
+## TLS & Email Security Project
 
 **Team Members:** Sofya & Jhannes  
+**Topic:** Email Auto-Detect Vulnerabilities and TLS Downgrade Attacks  
 **Weekly Meeting:** Monday: 13:30-14:00  
 **Supervisors:** Feng (G2.E-25) and Pejman (G2.E-35)
+
+### 📊 Current Project Status
+
+| Phase | Component | Status | Details |
+|-------|-----------|--------|---------|
+| **I** | Literature Review | ✅ Complete | NDSS 2025 paper analyzed |
+| **I** | Server Infrastructure | ✅ Operational | AWS EC2 @ mail.nsipmail.de |
+| **I** | MITM Framework | ✅ Ready | Test cases T1-T4 integrated |
+| **I** | Client Testing | 🔄 In Progress | Environment setup ongoing |
+| **II** | Attack Demonstrations | 📋 Planned | Q1 2026 |
+| **II** | Certificate Tests | 📋 Planned | Q1 2026 |
+
+**Next Milestone:** Complete mitmproxy setup and execute first STARTTLS stripping attack (T1)
 
 ---
 
@@ -93,24 +107,31 @@ This repository is organized to facilitate project management, documentation, an
 ### 📂 `50-implementation/`
 **Purpose:** Practical implementation work, server setup, and attack scripts
 
-**Contents:**
-- **Server Setup:** Email server configurations (Postfix, Dovecot)
-  - Multiple connection modes: I-TLS and O-TLS (STARTTLS)
-  - Port configurations (993, 995, 465, 143, 110, 587)
-- **MITM Scripts:** mitmproxy-based attack implementations
-  - Test cases T1-T4 (STARTTLS downgrade attacks)
-  - Certificate validation tests (C1-C4)
-- **Client Testing:** Email client testing setup and results
-  - Test configurations and logs
-  - Vulnerability analysis documentation
-- **Deployment:** VM setup, network configuration, Docker files
+**Current Status:**
+- ✅ **Email Server Operational:** AWS EC2 instance deployed at `mail.nsipmail.de` (13.62.95.49)
+  - Postfix + Dovecot configured with vulnerable settings
+  - I-TLS ports: 993 (IMAPS), 995 (POP3S), 465 (SMTPS)
+  - O-TLS/STARTTLS ports: 143 (IMAP), 110 (POP3), 587 (SMTP)
+  - Valid Let's Encrypt certificates installed
+  - Plaintext authentication verified (`disable_plaintext_auth = no`)
+  
+- ✅ **MITM Scripts Ready:** Original research code from paper authors
+  - Test cases T1-T4 for SMTP, IMAP, POP3 (STARTTLS downgrade attacks)
+  - TLS version downgrade PoC scripts
+  - mitmproxy integration modules prepared
+  
+- 🔄 **Client Testing:** Environment setup in progress
+  - mitmproxy installation and network configuration
+  - Test client selection and setup
+  - Initial test runs pending
 
 **Project Context:**
 - Recreating research from "A Multifaceted Study on the Use of TLS and Auto-detect in Email Ecosystems" (NDSS 2025)
-- Original code repositories:
-  - https://github.com/tls-downgrade
-  - https://github.com/tls-downgrade/email-security
-  - https://github.com/tls-downgrade/tls-downgrade
+- Original code repositories integrated:
+  - https://github.com/tls-downgrade/email-security (Test Cases T1-T4)
+  - https://github.com/tls-downgrade/tls-downgrade (Version Downgrade PoC)
+
+**Detailed Documentation:** See [`50-implementation/README.md`](./50-implementation/README.md) and [`50-implementation/server-setup/README.md`](./50-implementation/server-setup/README.md)
 
 **Note:** This directory directly contributes to the **Practice (Implementation)** evaluation component (10% in Phase I, 20% in Phase II)
 
@@ -181,11 +202,12 @@ Our project recreates and extends the research from the NDSS 2025 paper "A Multi
 3. What certificate validation weaknesses exist in popular email clients?
 4. How do real-world setup guides (e.g., HPI documentation) impact user security?
 
-### Phase I Focus (Current)
-- ✅ Literature review and paper analysis
-- 🔄 Email server testbed setup (Postfix + Dovecot)
-- 🔄 MITM framework development (mitmproxy)
-- 📋 Initial test case implementation (T1-T4)
+### Phase I Status (Current)
+- ✅ Literature review and paper analysis (NDSS 2025 paper)
+- ✅ Email server testbed deployed (AWS EC2 @ mail.nsipmail.de)
+- ✅ MITM framework ready (mitmproxy with T1-T4 test cases)
+- 🔄 Client testing environment setup
+- 📋 Initial attack demonstrations pending
 
 ### Phase II Focus (Upcoming)
 - Complete client testing across multiple platforms
@@ -193,6 +215,12 @@ Our project recreates and extends the research from the NDSS 2025 paper "A Multi
 - Real-world setup guide analysis
 - Experiments, measurements, and security analysis
 - Comparison with original paper findings
+
+### Implementation Details
+For detailed information about the server setup, attack scripts, and testing methodology, see:
+- **Implementation Overview:** [`50-implementation/README.md`](./50-implementation/README.md)
+- **Server Configuration:** [`50-implementation/server-setup/README.md`](./50-implementation/server-setup/README.md)
+- **Attack Scripts:** [`50-implementation/mitm-scripts/README.md`](./50-implementation/mitm-scripts/README.md)
 
 ---
 
@@ -206,3 +234,5 @@ Our project recreates and extends the research from the NDSS 2025 paper "A Multi
 6. **Prepare Deliverables Early:** Use `00-deliverables/` to stage materials before deadlines
 
 ---
+
+*Last Updated: November 2025*
