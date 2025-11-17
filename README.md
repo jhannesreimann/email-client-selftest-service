@@ -90,6 +90,32 @@ This repository is organized to facilitate project management, documentation, an
 
 ---
 
+### 📂 `50-implementation/`
+**Purpose:** Practical implementation work, server setup, and attack scripts
+
+**Contents:**
+- **Server Setup:** Email server configurations (Postfix, Dovecot)
+  - Multiple connection modes: I-TLS and O-TLS (STARTTLS)
+  - Port configurations (993, 995, 465, 143, 110, 587)
+- **MITM Scripts:** mitmproxy-based attack implementations
+  - Test cases T1-T4 (STARTTLS downgrade attacks)
+  - Certificate validation tests (C1-C4)
+- **Client Testing:** Email client testing setup and results
+  - Test configurations and logs
+  - Vulnerability analysis documentation
+- **Deployment:** VM setup, network configuration, Docker files
+
+**Project Context:**
+- Recreating research from "A Multifaceted Study on the Use of TLS and Auto-detect in Email Ecosystems" (NDSS 2025)
+- Original code repositories:
+  - https://github.com/tls-downgrade
+  - https://github.com/tls-downgrade/email-security
+  - https://github.com/tls-downgrade/tls-downgrade
+
+**Note:** This directory directly contributes to the **Practice (Implementation)** evaluation component (10% in Phase I, 20% in Phase II)
+
+---
+
 ## 📊 Evaluation Breakdown
 
 ### Intermediate (40%)
@@ -142,19 +168,31 @@ This repository is organized to facilitate project management, documentation, an
 
 ---
 
-## 🎯 Project Topic: TLS
+## 🎯 Project Topic: TLS & Email Security
 
-*This section will be expanded with specific research questions, implementation goals, and technical details as the project progresses.*
+### Research Focus
+**Email Auto-Detect Vulnerabilities and TLS Downgrade Attacks**
 
-### Phase I Focus
-- Literature review and research
-- Initial implementation prototypes
-- Architecture design
+Our project recreates and extends the research from the NDSS 2025 paper "A Multifaceted Study on the Use of TLS and Auto-detect in Email Ecosystems." We investigate security vulnerabilities in email clients' auto-detect features that allow attackers to strip TLS encryption and capture credentials in plaintext.
 
-### Phase II Focus
-- Full implementation
-- Experiments and analysis
-- Security evaluation and testing
+### Key Research Questions
+1. Are current (2025/2026) email client versions still vulnerable to STARTTLS downgrade attacks?
+2. How do different clients implement auto-detect, and which implementation patterns are most vulnerable?
+3. What certificate validation weaknesses exist in popular email clients?
+4. How do real-world setup guides (e.g., HPI documentation) impact user security?
+
+### Phase I Focus (Current)
+- ✅ Literature review and paper analysis
+- 🔄 Email server testbed setup (Postfix + Dovecot)
+- 🔄 MITM framework development (mitmproxy)
+- 📋 Initial test case implementation (T1-T4)
+
+### Phase II Focus (Upcoming)
+- Complete client testing across multiple platforms
+- Certificate validation experiments (C1-C4)
+- Real-world setup guide analysis
+- Experiments, measurements, and security analysis
+- Comparison with original paper findings
 
 ---
 
@@ -164,6 +202,7 @@ This repository is organized to facilitate project management, documentation, an
 2. **Update Regularly:** Maintain progress documentation to demonstrate ongoing work
 3. **Organize References:** Use `40-references/` systematically with proper citations
 4. **Plan Iteratively:** Update `10-planning/` as the project evolves
-5. **Prepare Deliverables Early:** Use `00-deliverables/` to stage materials before deadlines
+5. **Track Implementation:** Document all setup steps, configurations, and test results in `50-implementation/`
+6. **Prepare Deliverables Early:** Use `00-deliverables/` to stage materials before deadlines
 
 ---
