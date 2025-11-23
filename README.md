@@ -13,7 +13,7 @@
 | **I** | Literature Review | ✅ Complete | NDSS 2025 paper analyzed |
 | **I** | Server Infrastructure | ✅ Operational | AWS EC2 @ mail.nsipmail.de |
 | **I** | MITM Framework | ✅ Ready | Test cases T1-T4 integrated |
-| **I** | Client Testing | 🔄 In Progress | Environment setup ongoing |
+| **I** | Client Testing | 🔄 In Progress | First results in `60-findings/` |
 | **II** | Attack Demonstrations | 📋 Planned | Q1 2026 |
 | **II** | Certificate Tests | 📋 Planned | Q1 2026 |
 
@@ -137,6 +137,19 @@ This repository is organized to facilitate project management, documentation, an
 
 ---
 
+### 📂 `60-findings/`
+**Purpose:** Structured documentation of test results and vulnerabilities
+
+**Current Contents:**
+- **Thunderbird (Kali Linux):**
+  - T1 (STARTTLS Stripping) results for IMAP & SMTP
+  - Detailed logs and security assessment
+- **Planned:**
+  - Results for other clients (K-9 Mail, Apple Mail, etc.)
+  - Comparative analysis table
+
+---
+
 ## 📊 Evaluation Breakdown
 
 ### Intermediate (40%)
@@ -221,6 +234,7 @@ For detailed information about the server setup, attack scripts, and testing met
 - **Implementation Overview:** [`50-implementation/README.md`](./50-implementation/README.md)
 - **Server Configuration:** [`50-implementation/server-setup/README.md`](./50-implementation/server-setup/README.md)
 - **Attack Scripts:** [`50-implementation/mitm-scripts/README.md`](./50-implementation/mitm-scripts/README.md)
+- **Test Results:** [`60-findings/README.md`](./60-findings/README.md)
 
 ---
 
