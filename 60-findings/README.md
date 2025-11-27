@@ -19,9 +19,9 @@ Legend:
 
 | Client | OS / Platform | Protocol | T1 | T2 | T3 | T4 | Certificate (C1-C4) | Findings File |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
-| **Thunderbird 140.4.0esr** | Kali Linux | **IMAP** | ✅ | ⚪ | ⚪ | ⚪ | ⚪ | [Details](./Thunderbird_Kali_T1.md) |
-| | | **SMTP** | ⚠️ | ⚪ | ⚪ | ⚪ | ⚪ | [Details](./Thunderbird_Kali_T1.md) |
-| | | **POP3** | ⚪ | ⚪ | ⚪ | ⚪ | ⚪ | |
+| **Thunderbird 140.4.0esr** | Kali Linux | **IMAP** | ✅ | ✅ | ✅ | ⚠️ | ⚪ | [Details](./Thunderbird_Kali_T1.md) |
+| | | **SMTP** | ⚠️ | ✅ | ✅ | ✅ | ⚪ | [Details](./Thunderbird_Kali_T1.md) |
+| | | **POP3** | ✅ | ✅ | ✅ | ✅ | ⚪ | [Details](./Thunderbird_Kali_T1.md) |
 | | | | | | | | | |
 
 ---
@@ -29,3 +29,4 @@ Legend:
 ## 📝 Notes
 
 - **Thunderbird (SMTP T1):** Client fails securely (no plaintext auth) but explicitly suggests disabling STARTTLS in the error message. This is marked as ⚠️ **User-Dependent** risk.
+- **Thunderbird (IMAP T4):** Client detects untrusted certificate and shows warning dialog. User must actively click "Confirm Security Exception" to proceed. No credentials sent without user action. Marked as ⚠️ **User-Dependent**.
