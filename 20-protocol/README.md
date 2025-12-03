@@ -17,6 +17,8 @@ Protocol files follow this format: `YYYYMMDD_Meeting-XX.md`
 | 2025-11-03 | [02](20251103_Meeting-02.md) | Supervisor | Paper selection (Jolt vs Post-Quantum), DPI research direction, Backup planning |
 | 2025-11-10 | [03](20251110_Meeting-03.md) | Supervisor (Online) | NDSS Email Security paper focus, Infrastructure requirements, Prototype goals |
 | 2025-11-17 | [04](20251117_Meeting-04.md) | Supervisor | Adversary model, TLS downgrade attacks, Lightning talk preparation, Test cases |
+| 2025-11-24 | [05](20251124_Meeting-05.md) | Cancelled | Postponed due to illness, rescheduled to Dec 1 |
+| 2025-12-01 | [06](20251201_Meeting-06.md) | Supervisor | Setup & mitmproxy explanation, Test case execution, Lightning talk prep |
 
 ## Protocol Template
 
