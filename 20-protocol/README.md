@@ -19,6 +19,7 @@ Protocol files follow this format: `YYYYMMDD_Meeting-XX.md`
 | 2025-11-17 | [04](20251117_Meeting-04.md) | Supervisor | Adversary model, TLS downgrade attacks, Lightning talk preparation, Test cases |
 | 2025-11-24 | [05](20251124_Meeting-05.md) | Cancelled | Postponed due to illness, rescheduled to Dec 1 |
 | 2025-12-01 | [06](20251201_Meeting-06.md) | Supervisor | Setup & mitmproxy explanation, Test case execution, Lightning talk prep |
+| 2025-12-15 | [07](20251215_Meeting-07.md) | Supervisor | Shodan findings, lightning talk feedback, next presentation guidance, extension ideas |
 
 ## Protocol Template
 
