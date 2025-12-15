@@ -1,8 +1,10 @@
 # automated test setup
 
-example for thunderbird client
+See `infrastructure-diagram.md` for visual represenation
 
-# 1. configure network 
+# example for Thunderbird client
+
+## 1. configure network 
 
 ```
 cd 50-implementation/test-setup
@@ -24,7 +26,7 @@ to see created namespace:
 ip netns list
 ```
 
-# 2. start mitmproxy
+## 2. start mitmproxy
 
 **make sure you use customized mitmproxy with addons**
 see  https://github.com/tls-downgrade/email-security
@@ -45,14 +47,14 @@ stop with
 sudo pkill mitmdump
 ```
 
-## example:
+### example:
 ```
 sudo ip netns exec ns-tb mitmproxy --set spoof-source-address --ssl-insecure \
   --mode transparent --showhost \
   -s ../mitm-scripts/email-security/imap/t1.py
 ```
 
-# 3. run client in ns
+## 3. run client in ns
 
 1) recommended - with account setup in thunderbird UI
 ```

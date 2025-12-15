@@ -7,34 +7,13 @@ This directory contains the original research scripts from the NDSS 2025 paper a
 ### `email-security/` 
 **Source:** https://github.com/tls-downgrade/email-security
 
-Protocol-specific test cases implementing the four attack scenarios (T1-T4) for SMTP, IMAP, and POP3.
+Protocol-specific test cases implementing the four attack scenarios for security downgrade (T1-T4) for SMTP, IMAP, and POP3.
 
 **Test Cases:**
 - **T1:** STARTTLS capability stripping
 - **T2:** ServerHello replacement during TLS negotiation
 - **T3:** STARTTLS command rejection
 - **T4:** Post-handshake session disruption
-
-**Files:**
-```
-email-security/
-├── smtp/
-│   ├── t1.py    # Strips STARTTLS from EHLO response
-│   ├── t2.py    # Replaces ServerHello with error
-│   ├── t3.py    # Rejects STARTTLS command
-│   └── t4.py    # Disrupts TLS session after handshake
-├── imap/
-│   ├── t1.py    # IMAP-specific T1 implementation
-│   ├── t2.py    # IMAP-specific T2 implementation
-│   ├── t3.py    # IMAP-specific T3 implementation
-│   └── t4.py    # IMAP-specific T4 implementation
-├── pop3/
-│   ├── t1.py    # POP3-specific T1 implementation
-│   ├── t2.py    # POP3-specific T2 implementation
-│   ├── t3.py    # POP3-specific T3 implementation
-│   └── t4.py    # POP3-specific T4 implementation
-└── next_layer.py   # mitmproxy layer modification
-```
 
 ### `tls-downgrade/`
 **Source:** https://github.com/tls-downgrade/tls-downgrade
@@ -91,7 +70,42 @@ mitmproxy -s downgrade_poc.py
 
 ## 🔍 Script Analysis
 
-### T1: STARTTLS Stripping (smtp/t1.py)
+### Summary: T1-T4 – What They Do Per Protocol
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                    ATTACK SCRIPTS (T1-T4)                                       │
+└─────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────┬──────────────────────────────────┬────────────────────────────┐
+│           IMAP                   │           SMTP                   │           POP3             │
+│     (imap/t1.py - t4.py)         │     (smtp/t1.py - t4.py)         │    (pop3/t1.py - t4.py)    │
+├──────────────────────────────────┼──────────────────────────────────┼────────────────────────────┤
+│                                  │                                  │                            │
+│ Port 993 (IMAPS):                │ Port 465 (SMTPS):                │ Port 995 (POP3S):          │
+│ → Block (empty response)         │ → Block (empty response)         │ → Block (empty response)   │
+│   Forces fallback to 143         │   Forces fallback to 587         │   Forces fallback to 110   │
+│                                  │                                  │                            │
+│ Port 143 (IMAP):                 │ Port 587 (Submission):           │ Port 110 (POP3):           │
+│ ─────────────────                │ ──────────────────────           │ ────────────────           │
+│                                  │                                  │                            │
+│ T1: Strip STARTTLS from          │ T1: Strip STARTTLS from          │ T1: Strip STLS from        │
+│     CAPABILITY response          │     EHLO response                │     CAPA response          │
+│                                  │                                  │                            │
+│ T2: Replace TLS ServerHello      │ T2: Replace TLS ServerHello      │ T2: Replace TLS ServerHello│
+│     with error after ClientHello │     with error after ClientHello │     with error             │
+│                                  │                                  │                            │
+│ T3: Reject STARTTLS command      │ T3: Reject STARTTLS command      │ T3: Reject STLS command    │
+│     with "BAD" response          │     with error response          │     with "-ERR" response   │
+│                                  │                                  │                            │
+│ T4: Replace TLS Application Data │ T4: Replace TLS Application Data │ T4: Replace TLS App Data   │
+│     with plaintext NOOP          │     with plaintext               │     with "-ERR"            │
+│                                  │                                  │                            │
+└──────────────────────────────────┴──────────────────────────────────┴────────────────────────────┘
+```
+
+### Detailed example: T1-T4 for SMTP
+#### T1: STARTTLS Stripping (smtp/t1.py)
 
 **Attack Vector:** Removes `STARTTLS` capability from server's EHLO response
 
@@ -108,7 +122,7 @@ if b'STARTTLS' in server_msg:
 
 ---
 
-### T2: ServerHello Replacement (smtp/t2.py)
+#### T2: ServerHello Replacement (smtp/t2.py)
 
 **Attack Vector:** Intercepts TLS negotiation, replaces ServerHello with error message
 
@@ -116,7 +130,7 @@ if b'STARTTLS' in server_msg:
 
 ---
 
-### T3: STARTTLS Rejection (smtp/t3.py)
+#### T3: STARTTLS Rejection (smtp/t3.py)
 
 **Attack Vector:** Responds with error when client sends STARTTLS command
 
@@ -131,7 +145,7 @@ if b'220 2.0.0 Ready to start TLS' in server_msg:
 
 ---
 
-### T4: Post-Handshake Disruption (smtp/t4.py)
+#### T4: Post-Handshake Disruption (smtp/t4.py)
 
 **Attack Vector:** Disrupts TLS session after successful handshake by injecting commands
 
@@ -156,21 +170,6 @@ if b'220 2.0.0 Ready to start TLS' in server_msg:
 
 ---
 
-## 📋 Testing Checklist
-
-For each email client tested:
-
-- [ ] Run T1 (STARTTLS stripping) on SMTP port 587
-- [ ] Run T1 on IMAP port 143
-- [ ] Run T2 (ServerHello replacement) on both protocols
-- [ ] Run T3 (STARTTLS rejection) on both protocols
-- [ ] Run T4 (Post-handshake disruption) on both protocols
-- [ ] Document: Does client send plaintext credentials?
-- [ ] Document: Does client show security warning?
-- [ ] Save logs and notes to `60-findings/`
-
----
-
 ## ⚠️ Important Notes
 
 1. **Transparent Mode:** Requires root/sudo for port binding and iptables configuration
@@ -178,6 +177,73 @@ For each email client tested:
 3. **Network Routing:** Configure test device to route all traffic through mitmproxy
 4. **Port Blocking:** For auto-detect testing, may need to block secure ports (993, 465, 995)
 
----
+### Manual vs. Autodetect Client Configuration
 
-*Scripts sourced from NDSS 2025 paper authors' GitHub repositories*
+| Aspect | Manual Configuration | Autodetect |
+|--------|---------------------|------------|
+| **User sets** | Port + Security explicitly (e.g., 143 + STARTTLS) | Only email address |
+| **Client decides** | Nothing – user controls everything | Port, security, authentication |
+| **Attack surface** | Only the chosen port | All ports (993 → 143 fallback) |
+| **What we test** | Does client fall back to plaintext? | Does client choose insecure option? |
+
+### Attack Flow Diagrams
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                         ATTACK FLOWS                                            │
+└─────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+AUTODETECT SCENARIO (Example: IMAP):
+====================================
+
+   LOCAL MACHINE                                                          MAIL SERVER
+   ─────────────                                                          ───────────
+   Email Client              mitmproxy (MITM)                             mail.nsipmail.de
+        │                          │                                            │
+        │──── Connect :993 ───────►│                                            │
+        │                          │──── Connect :993 ─────────────────────────►│
+        │                          │◄─── TLS ServerHello ───────────────────────│
+        │◄─── [BLOCKED/EMPTY] ─────│  (Script blocks implicit TLS)              │
+        │                          │                                            │
+        │  (Client: "993 failed, try 143...")                                   │
+        │                          │                                            │
+        │──── Connect :143 ───────►│                                            │
+        │                          │──── Connect :143 ─────────────────────────►│
+        │                          │◄─── * OK ... CAPABILITY ... STARTTLS ──────│
+        │◄─── * OK ... CAPABILITY ─│  (T1: STARTTLS stripped from response)     │
+        │     [STARTTLS removed]   │                                            │
+        │                          │                                            │
+        │  (Client: "No STARTTLS available, server doesn't support TLS")        │
+        │                          │                                            │
+        │──── a1 LOGIN user pass ─►│                                            │
+        │              ▲           │                                            │
+        │              │           │                                            │
+        │     CREDENTIALS IN       │                                            │
+        │     PLAINTEXT!           │                                            │
+
+
+MANUAL CONFIG SCENARIO (Example: SMTP Port 587):
+================================================
+
+   LOCAL MACHINE                                                          MAIL SERVER
+   ─────────────                                                          ───────────
+   Email Client              mitmproxy (MITM)                             mail.nsipmail.de
+        │                          │                                            │
+        │──── Connect :587 ───────►│                                            │
+        │                          │──── Connect :587 ─────────────────────────►│
+        │                          │◄─── 220 mail.nsipmail.de ESMTP ────────────│
+        │◄─── 220 ... ESMTP ───────│                                            │
+        │                          │                                            │
+        │──── EHLO client ────────►│                                            │
+        │                          │──── EHLO client ──────────────────────────►│
+        │                          │◄─── 250-STARTTLS ... ──────────────────────│
+        │◄─── 250-... [stripped] ──│  (T1: STARTTLS removed from EHLO response) │
+        │                          │                                            │
+        │                          │                                            │
+        │  SECURE CLIENT (Thunderbird):                                         │
+        │  "STARTTLS required but not offered → Connection aborted"             │
+        │                          │                                            │
+        │  INSECURE CLIENT:                                                     │
+        │  "OK, continue without TLS"                                           │
+        │──── AUTH PLAIN base64 ──►│  ← CREDENTIALS EXPOSED!                    │
+```
