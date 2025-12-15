@@ -29,8 +29,12 @@ ip netns list
 **make sure you use customized mitmproxy with addons**
 see  https://github.com/tls-downgrade/email-security
 
+Example (run mitmproxy inside the namespace and load a test-case script from this repository):
+
 ```
-sudo ./run-mitm.sh <network_namespace> <script.py>
+sudo ip netns exec $NS mitmproxy --set spoof-source-address --ssl-insecure \
+  --mode transparent --showhost \
+  -s ../mitm-scripts/email-security/imap/t1.py
 ```
 
 ```
@@ -43,11 +47,9 @@ sudo pkill mitmdump
 
 ## example:
 ```
-sudo ./run-mitm.sh ns-tb imap/t1.py 
-[INFO] Assumes mitmdump at ./.venv/bin/mitmdump customize if necessary
-[INFO] This script creates a 'logs' directory in the current folder
-[+] Logs (stdout&stderr) → /home/sagen/Desktop/nsproj/mitmproxy/logs/imap_t1_20251201_110450.log
-[+] Mitmproxy flow → /home/sagen/Desktop/nsproj/mitmproxy/logs/imap_t1_20251201_110450.mitm (read with: mitmdump -nr /home/sagen/Desktop/nsproj/mitmproxy/logs/imap_t1_20251201_110450.mitm)
+sudo ip netns exec ns-tb mitmproxy --set spoof-source-address --ssl-insecure \
+  --mode transparent --showhost \
+  -s ../mitm-scripts/email-security/imap/t1.py
 ```
 
 # 3. run client in ns

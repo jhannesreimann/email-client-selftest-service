@@ -7,6 +7,10 @@ Current clients:
 
 See individual markdown files in this folder for detailed results per client and test case.
 
+In addition to client testing, this folder also contains a **passive Shodan measurement** (banner-based indicators on mail STARTTLS ports):
+- Plots + explanation: `60-findings/shodan-plots/`
+- Reproduction scripts: `60-findings/shodan-plots/shodan_mail_tls_stats.py` and `60-findings/shodan-plots/plot_shodan_mail_tls_stats.py`
+
 ## 📊 Client Vulnerability Matrix
 
 Legend:

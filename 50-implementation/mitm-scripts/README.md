@@ -17,7 +17,7 @@ Protocol-specific test cases implementing the four attack scenarios (T1-T4) for 
 
 **Files:**
 ```
-email-security-main/
+email-security/
 ├── smtp/
 │   ├── t1.py    # Strips STARTTLS from EHLO response
 │   ├── t2.py    # Replaces ServerHello with error
@@ -43,7 +43,7 @@ TLS version downgrade proof-of-concept that forces clients to use older, potenti
 
 **Files:**
 ```
-tls-downgrade-main/
+tls-downgrade/
 ├── downgrade_poc.py   # Main downgrade attack logic
 ├── client_hello.py    # TLS ClientHello parser
 ├── proxy.py           # Transparent proxy configuration
@@ -58,7 +58,7 @@ tls-downgrade-main/
 
 ```bash
 # Navigate to email-security directory
-cd email-security/*/email-security-main/
+cd 50-implementation/mitm-scripts/email-security/
 
 # Setup mitmproxy (one-time)
 cp -r smtp/ imap/ pop3/ <mitmproxy-installation>/
@@ -77,7 +77,7 @@ mitmproxy --set spoof-source-address --ssl-insecure \
 
 ```bash
 # Navigate to tls-downgrade directory
-cd tls-downgrade/*/tls-downgrade-main/
+cd 50-implementation/mitm-scripts/tls-downgrade/
 
 # Setup mitmproxy (one-time)
 cp *.py <mitmproxy-installation>/
@@ -167,7 +167,7 @@ For each email client tested:
 - [ ] Run T4 (Post-handshake disruption) on both protocols
 - [ ] Document: Does client send plaintext credentials?
 - [ ] Document: Does client show security warning?
-- [ ] Save mitmproxy logs to `../client-testing/test-results/`
+- [ ] Save logs and notes to `60-findings/`
 
 ---
 

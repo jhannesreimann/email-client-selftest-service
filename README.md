@@ -144,6 +144,9 @@ This repository is organized to facilitate project management, documentation, an
 - **Thunderbird (Kali Linux):**
   - T1 (STARTTLS Stripping) results for IMAP & SMTP
   - Detailed logs and security assessment
+- **Shodan passive measurement (mail TLS / STARTTLS indicators):**
+  - Plots and reproduction instructions in `60-findings/shodan-plots/`
+  - Scripts to generate stats and render plots under `60-findings/shodan-plots/`
 - **Planned:**
   - Results for other clients (K-9 Mail, Apple Mail, etc.)
   - Comparative analysis table

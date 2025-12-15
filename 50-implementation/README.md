@@ -29,22 +29,23 @@ This directory contains all practical implementation work, including server setu
 │
 ├── mitm-scripts/          # ✅ MITM attack implementations (READY)
 │   ├── email-security/    # Test Cases T1-T4 for email protocols
-│   │   └── email-security-main/
-│   │       ├── smtp/      # T1-T4 for SMTP (Port 587)
-│   │       ├── imap/      # T1-T4 for IMAP (Port 143)
-│   │       ├── pop3/      # T1-T4 for POP3 (Port 110)
-│   │       └── next_layer.py  # mitmproxy layer modification
+│   │   ├── smtp/          # T1-T4 for SMTP (Port 587)
+│   │   ├── imap/          # T1-T4 for IMAP (Port 143)
+│   │   ├── pop3/          # T1-T4 for POP3 (Port 110)
+│   │   └── next_layer.py  # mitmproxy layer modification
 │   │
 │   └── tls-downgrade/     # TLS version downgrade PoC
-│       └── tls-downgrade-main/
-│           ├── downgrade_poc.py   # Main downgrade attack script
-│           ├── client_hello.py    # ClientHello parser
-│           ├── proxy.py           # Proxy configuration
-│           └── next_layer.py      # Layer handling
+│       ├── downgrade_poc.py   # Main downgrade attack script
+│       ├── client_hello.py    # ClientHello parser
+│       ├── proxy.py           # Proxy configuration
+│       └── next_layer.py      # Layer handling
 │
-└── client-testing/        # 🔄 To be added: Client test results
-    ├── test-results/      # Test logs per client
-    └── client-configs/    # Client setup documentation
+└── test-setup/            # Local network namespace utilities
+    ├── setup-ns.sh        # Create netns + redirect mail ports to mitmproxy
+    ├── teardown_ns.sh     # Cleanup netns + NAT rules
+    ├── run-client-in-ns.sh
+    ├── client-setup.sh
+    └── setup-thunderbird.sh
 ```
 
 ---
@@ -194,8 +195,8 @@ Test certificates to be generated:
 # Install mitmproxy
 pip install mitmproxy
 
-# Clone/Navigate to test case directory
-cd 50-implementation/mitm-scripts/email-security/*/email-security-main/
+# Navigate to the vendored test cases
+cd 50-implementation/mitm-scripts/email-security/
 
 # Modify mitmproxy installation (one-time setup)
 # Copy protocol folders and next_layer.py to mitmproxy source
@@ -218,7 +219,7 @@ mitmproxy --set spoof-source-address --ssl-insecure \
    - User: `testuser` / Password: `password123`
 2. **Start mitmproxy** with desired test case (T1-T4)
 3. **Observe Traffic:** Watch for plaintext AUTH commands
-4. **Document Results:** Save logs to `client-testing/test-results/`
+4. **Document Results:** Save logs and notes to `60-findings/`
 
 ### Server Access
 - **SSH:** `ssh ubuntu@13.62.95.49` (key-based auth)
@@ -306,6 +307,6 @@ This directory supports the **Practice (Implementation)** evaluation component:
 
 **Documentation Standards:**
 - ✅ Setup steps and configurations (server-setup/README.md)
-- 🔄 Test results and observations (to be added in client-testing/)
+- 🔄 Test results and observations (document in 60-findings/)
 - ✅ Original paper script analysis (documented in this README)
 - 🔄 Challenges and solutions (to be documented during testing)
