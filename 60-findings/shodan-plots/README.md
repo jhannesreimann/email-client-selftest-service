@@ -1,5 +1,17 @@
 # Shodan Mail-TLS Plots
 
+## FAQ
+
+**what we do**: We collect statistics to show how many potentially vulnerable mail servers can be found on internet (using Shodan)
+
+**why**: we want to answer the question "is our tls-downgrade attack relevant?"
+
+**motivation**: our tls-downgrade attack relies on server misconfiguration. the server must allow authentication before TLS. in other words, the attack is targeting servers that allow something else apart from implicit TLS.
+
+**methodology**: check if a server advertises AUTH option before TLS is established
+
+**results**: thousands of servers seem to be vulnerable. See this summary plot `totals_overview.png`
+
 ## TL;DR (Findings)
 
 These plots summarize a **passive, banner-based** measurement using Shodan to estimate how common potentially risky mail-server configurations are on **STARTTLS** ports.
