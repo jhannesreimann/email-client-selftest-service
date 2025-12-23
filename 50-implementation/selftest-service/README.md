@@ -53,25 +53,26 @@ Modes approximate different disruption patterns:
 - `t1`: does **not** advertise STARTTLS (capability stripping equivalent).
 - `t2`: advertises STARTTLS, replies OK/Ready, then drops (approx handshake failure).
 - `t3`: advertises STARTTLS but rejects the STARTTLS command.
-- `t4`: completes TLS, then disrupts after auth/login (post-handshake disruption-like).
+- `t4`: completes TLS handshake, then disrupts the session by injecting unexpected data (e.g., `NOOP`) and closing.
 
-## DNS setup (SRV autodetect; no provider XML)
+## DNS setup (A-record based; no SRV)
 
 This service intentionally **does not** provide Thunderbird Autoconfig XML.
-Autodetect support is via **DNS SRV** only (client support varies).
 
-Required:
+The recommended way to run the self-test is **manual configuration** (paper-compatible and most reproducible).
 
-- `A` record:
-  - `selftest.nsipmail.de -> <public IP>`
+For autodetect/heuristic setup, this deployment relies on **A records only** (SRV is intentionally not used).
 
-Recommended SRV records for the same hostname:
+Required A records:
 
-- `_imap._tcp.selftest.nsipmail.de` → port `143`, target `selftest.nsipmail.de.`
-- `_imaps._tcp.selftest.nsipmail.de` → port `993`, target `selftest.nsipmail.de.`
-- `_submission._tcp.selftest.nsipmail.de` → port `587`, target `selftest.nsipmail.de.`
-- `_submissions._tcp.selftest.nsipmail.de` → port `465`, target `selftest.nsipmail.de.`
-- `_smtp._tcp.selftest.nsipmail.de` → port `25`, target `selftest.nsipmail.de.` (optional)
+- `selftest.nsipmail.de -> <public IP>`
+- `imap.selftest.nsipmail.de -> <public IP>`
+- `smtp.selftest.nsipmail.de -> <public IP>`
+- `mail.selftest.nsipmail.de -> <public IP>`
+
+Important limitation:
+
+- Some clients (notably Thunderbird) may use a central provider database (Mozilla/Thunderbird ISPDB) and suggest hosted-provider endpoints even when DNS-based discovery is unavailable. This is outside the control of this service.
 
 ## Usage (end user workflow)
 
@@ -106,7 +107,10 @@ Optional (implicit TLS variant):
 ### 4) Check results
 
 - Open the session status page from the WebUI.
-- The service reports whether it observed any **plaintext LOGIN/AUTH** events (i.e., auth attempted with `tls=false`).
+- The WebUI computes a verdict:
+  - `FAIL`: the service observed an auth/login attempt with `tls=false` (plaintext credentials exposure).
+  - `PASS`: the service observed an auth/login attempt with `tls=true` and no plaintext auth.
+  - `INCONCLUSIVE`: no auth/login attempt was observed (client aborted early, stuck retrying, or only probed STARTTLS).
 
 ## Deployment (AWS EC2 example)
 
@@ -240,8 +244,9 @@ sudo tail -n 50 /var/log/nsip-selftest/events.jsonl
 
 ### Autodetect finds the wrong provider
 
-- Ensure you enter an address like `test-SESSION@selftest.nsipmail.de` (the domain controls autodetect).
-- DNS propagation/caching can delay SRV changes.
+- Prefer **Manual configuration** (host `selftest.nsipmail.de`, ports `143/587` with STARTTLS or `993/465` with SSL/TLS).
+- Some clients (notably Thunderbird) may use Mozilla/Thunderbird ISPDB and propose hosted-provider endpoints (outside of this service's control).
+- DNS propagation/caching can delay A-record changes.
 
 ### No events show up
 

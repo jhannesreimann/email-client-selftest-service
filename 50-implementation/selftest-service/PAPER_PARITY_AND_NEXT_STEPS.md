@@ -53,7 +53,7 @@ Even though the paper describes an **active MITM**, the *client-observed behavio
   - Paper parity: medium. This is harder to reproduce faithfully without a MITM because “replace ServerHello” is very specific to being on-path.
 
 - **T4 (post-handshake disruption)**
-  - Simulation: complete TLS handshake, then inject protocol-invalid/unexpected data or close connection after auth.
+  - Simulation: complete TLS handshake, then inject protocol-invalid/unexpected data (e.g., `NOOP`) and close the connection.
   - Paper parity: medium/high depending on exact client behavior being measured.
 
 ---
@@ -210,13 +210,38 @@ Ensure the simulated modes match the paper’s decision points precisely.
 
 - **T4**
   - After successful TLS handshake, disrupt the TLS session.
-  - Decide and document what “disrupt” means in your implementation:
-    - inject garbage,
-    - send a protocol message at the wrong time,
-    - close connection immediately,
-    - or disrupt after successful auth.
+  - In the current implementation, “disrupt” means: after the STARTTLS handshake succeeds, inject unexpected data (e.g., `NOOP`) on the TLS channel and then close.
 
 ### 6.3 Protocol realism to trigger client behavior (medium/high)
+
+### 6.3.1 Autodetect / heuristic-guessing limitation for public self-tests
+
+The paper explicitly studies the case where the client is forced into **heuristic guessing** by blocking discovery mechanisms (Autoconfig/AutoDiscover/DNS SRV).
+
+In a public self-test, this is hard to reproduce for some clients because there is an additional discovery path that is **outside of our domain control**:
+
+- Some clients (notably Thunderbird) can query the Mozilla/Thunderbird **ISPDB** (a central provider database) and obtain server settings for the email domain.
+
+This has an important consequence:
+
+- Even if we disable DNS-based discovery (no SRV, and **NXDOMAIN** for `autoconfig.*` / `autodiscover.*` subdomains), the client may still not enter heuristic guessing, because it can directly use ISPDB-provided endpoints (e.g., a hosted-provider default like `imap.<provider>.de`, `smtp.<provider>.de`).
+
+In the current public deployment, we rely on simple A records (e.g., `imap.selftest...`, `smtp.selftest...`, `mail.selftest...`) and do not expose SRV records.
+
+Why this cannot be fixed purely server-side:
+
+- The ISPDB request is an outbound request made by the client to a third-party host.
+- Our self-test service only observes connections that actually reach our SMTP/IMAP listeners. If the client never attempts to connect to our hostnames/ports, we cannot influence the discovery decision.
+- Under the project goal "the client should not need any special setup", we cannot require users to change Thunderbird settings or install custom DNS/firewall rules.
+
+Practical workarounds (not aligned with the strict "no client changes" goal):
+
+- **Network-side blocking** of the ISPDB host (lab/controlled network), which matches the paper's attacker assumption (blocking discovery queries).
+- Use an email domain under a different organizational domain that is not mapped in ISPDB/provider heuristics, so that the client has no ISPDB configuration to fall back to.
+
+Resulting scope decision for the public service:
+
+- For some clients/providers, the public self-test cannot reliably force heuristic guessing without either a controlled network environment or a different email domain. Therefore, heuristic-guessing experiments may need to be documented as "lab-only" or "best-effort" rather than guaranteed for all users.
 
 Some clients only reach certain decision points if the server appears realistic.
 

@@ -458,6 +458,79 @@ def _read_events(events_path: Path, limit_lines: int = 2000) -> list[dict[str, A
     return out
 
 
+def _summarize_session(events: list[dict[str, Any]], session: str) -> dict[str, Any]:
+    hits = [e for e in events if e.get("session") == session]
+    hits = sorted(hits, key=lambda e: int(e.get("ts", 0)))
+
+    auth_events = {"auth_command", "auth_login", "login_command"}
+    connect_events = {"connect"}
+    disconnect_events = {"disconnect"}
+
+    def _proto_summary(proto: str) -> dict[str, Any]:
+        proto_hits = [e for e in hits if e.get("proto") == proto]
+        ports = sorted({int(e.get("server_port")) for e in proto_hits if isinstance(e.get("server_port"), int) or str(e.get("server_port", "")).isdigit()})
+        connects = [e for e in proto_hits if e.get("event") in connect_events]
+        disconnects = [e for e in proto_hits if e.get("event") in disconnect_events]
+        auth_plain = [e for e in proto_hits if (e.get("event") in auth_events) and (e.get("tls") is False)]
+        auth_tls = [e for e in proto_hits if (e.get("event") in auth_events) and (e.get("tls") is True)]
+        starttls = [e for e in proto_hits if e.get("event") == "starttls"]
+        starttls_results: dict[str, int] = {}
+        for s in starttls:
+            r = str(s.get("result") or "unknown")
+            starttls_results[r] = starttls_results.get(r, 0) + 1
+
+        return {
+            "ports": ports,
+            "connects": len(connects),
+            "disconnects": len(disconnects),
+            "auth_plain": len(auth_plain),
+            "auth_tls": len(auth_tls),
+            "starttls": len(starttls),
+            "starttls_results": starttls_results,
+            "last_ts": int(proto_hits[-1].get("ts", 0)) if proto_hits else None,
+        }
+
+    smtp = _proto_summary("smtp")
+    imap = _proto_summary("imap")
+
+    saw_plain = (smtp["auth_plain"] + imap["auth_plain"]) > 0
+    saw_tls_auth = (smtp["auth_tls"] + imap["auth_tls"]) > 0
+    saw_any_auth = saw_plain or saw_tls_auth
+
+    connects_total = int(smtp["connects"]) + int(imap["connects"])
+    disconnects_total = int(smtp["disconnects"]) + int(imap["disconnects"])
+    retry_like = connects_total >= 6 and not saw_any_auth
+
+    starttls_refused_like = (
+        smtp["starttls_results"].get("refused", 0)
+        + smtp["starttls_results"].get("drop_after_ready", 0)
+        + smtp["starttls_results"].get("wrap_failed", 0)
+        + imap["starttls_results"].get("refused", 0)
+        + imap["starttls_results"].get("drop_after_ok", 0)
+    )
+
+    if saw_plain:
+        verdict = "FAIL"
+    elif saw_tls_auth:
+        verdict = "PASS"
+    else:
+        verdict = "INCONCLUSIVE"
+
+    return {
+        "session": session,
+        "events": hits,
+        "verdict": verdict,
+        "saw_plain": saw_plain,
+        "saw_tls_auth": saw_tls_auth,
+        "retry_like": retry_like,
+        "starttls_refused_like": int(starttls_refused_like),
+        "smtp": smtp,
+        "imap": imap,
+        "first_ts": int(hits[0].get("ts", 0)) if hits else None,
+        "last_ts": int(hits[-1].get("ts", 0)) if hits else None,
+    }
+
+
 def create_app(hostname: str, store_path: Path, events_path: Path) -> FastAPI:
     app = FastAPI()
 
@@ -489,7 +562,7 @@ def create_app(hostname: str, store_path: Path, events_path: Path) -> FastAPI:
         now = int(time.time())
         expires = now + ttl
         overrides = [o for o in data.get("overrides", []) if o.get("ip") != ip]
-        overrides.append({"ip": ip, "mode": mode, "expires": expires})
+        overrides.append({"ip": ip, "mode": mode, "expires": expires, "session": session})
         data["overrides"] = overrides
         _save_store(store_path, data)
 
@@ -603,8 +676,8 @@ _smtp._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 25   TARGET {hostname}.</pre>
     @app.get("/status", response_class=HTMLResponse)
     def status(session: str) -> str:
         events = _read_events(events_path)
-        hits = [e for e in events if e.get("session") == session]
-        hits = sorted(hits, key=lambda e: int(e.get("ts", 0)))
+        summary = _summarize_session(events, session)
+        hits = summary["events"]
         last = hits[-1] if hits else None
 
         def _row(label: str, value: str) -> str:
@@ -622,18 +695,72 @@ _smtp._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 25   TARGET {hostname}.</pre>
         else:
             rows.append(_row("Last event", "(none yet)"))
 
-        # Simple risk indicator: any auth/login with tls=false for this session
-        saw_plain = any((e.get("event") in {"auth_command", "auth_login", "login_command"}) and (e.get("tls") is False) for e in hits)
-        risk = "YES (plaintext auth observed)" if saw_plain else "NO (no plaintext auth observed yet)"
+        verdict = str(summary.get("verdict"))
+        if verdict == "FAIL":
+            headline = "FAIL (plaintext credentials exposure observed)"
+        elif verdict == "PASS":
+            headline = "PASS (no plaintext credentials observed; TLS auth seen)"
+        else:
+            headline = "INCONCLUSIVE (no credentials observed yet)"
+
+        smtp = summary.get("smtp", {})
+        imap = summary.get("imap", {})
+        retry_like = bool(summary.get("retry_like"))
+        starttls_refused_like = int(summary.get("starttls_refused_like") or 0)
+
+        details = []
+        details.append(f"<div class=\"row\"><b>Verdict</b>: <span class=\"pill\">{headline}</span></div>")
+        details.append(
+            "<div class=\"row muted\"><b>FAIL</b> only triggers when the service observes an auth/login attempt with <code>tls=false</code>." "</div>"
+        )
+        if verdict == "INCONCLUSIVE":
+            details.append(
+                "<div class=\"row muted\">No auth/login attempt was observed. This often means the client aborted earlier (e.g., due to TLS errors) or got stuck retrying.</div>"
+            )
+        if retry_like:
+            details.append(
+                "<div class=\"row muted\"><b>Retry loop hint:</b> multiple reconnects were observed without reaching authentication. This can happen if the client keeps trying different settings.</div>"
+            )
+        if starttls_refused_like > 0:
+            details.append(
+                "<div class=\"row muted\"><b>STARTTLS disruption observed:</b> the client attempted STARTTLS and the server refused/dropped it (testcase behavior). Some clients may respond by suggesting insecure changes.</div>"
+            )
+
+        if verdict in {"INCONCLUSIVE", "PASS"}:
+            details.append(
+                "<div class=\"glass-panel\" style=\"margin-top: 12px;\">"
+                "<h2>If you saw no clear result, check your client UI</h2>"
+                "<div class=\"row muted\">If your client shows prompts like these, that is a <b>security-relevant downgrade signal</b> even if we did not observe plaintext credentials on the wire:</div>"
+                "<div class=\"row\">- Suggesting to <b>disable STARTTLS</b> / use <b>no encryption</b></div>"
+                "<div class=\"row\">- Suggesting to change security from <b>STARTTLS</b> to <b>None</b></div>"
+                "<div class=\"row\">- Suggesting to accept an <b>insecure connection</b> to proceed</div>"
+                "<div class=\"row muted\">If you see such prompts, please do <b>not</b> follow them. Take a screenshot and report it as a downgrade indication.</div>"
+                "</div>"
+            )
 
         table = "<table>" + "".join(rows) + "</table>"
+        proto_table = (
+            "<table>"
+            + "".join(
+                [
+                    "<tr><th>Protocol</th><th>Ports</th><th>Connects</th><th>Disconnects</th><th>STARTTLS</th><th>Auth (TLS)</th><th>Auth (plain)</th></tr>",
+                    f"<tr><td>IMAP</td><td><code>{imap.get('ports')}</code></td><td>{imap.get('connects')}</td><td>{imap.get('disconnects')}</td><td>{imap.get('starttls')} <span class=\"muted\">{json.dumps(imap.get('starttls_results', {}))}</span></td><td>{imap.get('auth_tls')}</td><td>{imap.get('auth_plain')}</td></tr>",
+                    f"<tr><td>SMTP</td><td><code>{smtp.get('ports')}</code></td><td>{smtp.get('connects')}</td><td>{smtp.get('disconnects')}</td><td>{smtp.get('starttls')} <span class=\"muted\">{json.dumps(smtp.get('starttls_results', {}))}</span></td><td>{smtp.get('auth_tls')}</td><td>{smtp.get('auth_plain')}</td></tr>",
+                ]
+            )
+            + "</table>"
+        )
+
         body = f"""
 <h1>Status</h1>
-<p><b>Plaintext authentication observed:</b> {risk}</p>
-{table}
+<div class="glass-panel">{''.join(details)}</div>
+<div style="margin-top: 12px;">{table}</div>
+
+<h2>Protocol summary</h2>
+{proto_table}
 
 <h2>Recent events</h2>
-<pre>{json.dumps(hits[-20:], indent=2)}</pre>
+<pre>{json.dumps(hits[-40:], indent=2)}</pre>
 
 <div class=\"row\"><a class=\"btn\" href=\"/status?session={session}\">Refresh</a> <a class=\"btn\" href=\"/\">Back</a></div>
 """
@@ -657,9 +784,12 @@ _smtp._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 25   TARGET {hostname}.</pre>
 
         overrides: list[dict[str, Any]] = []
         cur_expires: Optional[int] = None
+        cur_session: Optional[str] = None
         for o in data.get("overrides", []):
             if o.get("ip") == ip:
                 cur_expires = int(o.get("expires", 0))
+                s = o.get("session")
+                cur_session = str(s) if s is not None else None
                 continue
             overrides.append(o)
 
@@ -669,7 +799,7 @@ _smtp._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 25   TARGET {hostname}.</pre>
         if new_expires > hard_cap:
             new_expires = hard_cap
 
-        overrides.append({"ip": ip, "mode": mode, "expires": new_expires})
+        overrides.append({"ip": ip, "mode": mode, "expires": new_expires, "session": (cur_session or session)})
         data["overrides"] = overrides
         _save_store(store_path, data)
 
@@ -678,9 +808,8 @@ _smtp._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 25   TARGET {hostname}.</pre>
     @app.get("/api/session/{session}")
     def api_session(session: str) -> JSONResponse:
         events = _read_events(events_path)
-        hits = [e for e in events if e.get("session") == session]
-        hits = sorted(hits, key=lambda e: int(e.get("ts", 0)))
-        return JSONResponse({"ok": True, "session": session, "events": hits[-200:]})
+        summary = _summarize_session(events, session)
+        return JSONResponse({"ok": True, "session": session, "verdict": summary.get("verdict"), "summary": {"smtp": summary.get("smtp"), "imap": summary.get("imap"), "retry_like": summary.get("retry_like"), "starttls_refused_like": summary.get("starttls_refused_like"), "saw_plain": summary.get("saw_plain"), "saw_tls_auth": summary.get("saw_tls_auth")}, "events": summary.get("events", [])[-200:]})
 
     @app.exception_handler(Exception)
     def _err(_: Request, exc: Exception) -> JSONResponse:
