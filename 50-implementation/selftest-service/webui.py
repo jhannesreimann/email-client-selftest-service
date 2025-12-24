@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 
 def _load_store(path: Path) -> dict[str, Any]:
@@ -56,390 +57,38 @@ def _new_session_code() -> str:
     return (cleaned[:10] or "X")
 
 
+_BASE_TEMPLATE: Optional[str] = None
+
+
 def _html_page(title: str, body_html: str) -> str:
-    return """<!doctype html>
-<html lang=\"en\">
-<head>
-  <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <title>__TITLE__</title>
-  <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    :root {
-      color-scheme: dark;
-      --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      --ocean-primary: #0f172a;
-      --ocean-secondary: #1e293b;
-      --ocean-accent: #0ea5e9;
-      --glass-bg: rgba(255, 255, 255, 0.03);
-      --glass-border: rgba(255, 255, 255, 0.08);
-      --text-primary: #ffffff;
-      --text-secondary: rgba(255, 255, 255, 0.7);
-      --shadow-premium: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
-    }
-
-    html, body { height: 100%; }
-
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
-      min-height: 100vh;
-      background: radial-gradient(ellipse at bottom, var(--ocean-secondary) 0%, var(--ocean-primary) 100%);
-      position: relative;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: var(--text-primary);
-      overflow: hidden;
-      line-height: 1.5;
-    }
-
-    /* Dynamic Ocean Background */
-    .ocean-container {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      z-index: 0;
-      overflow: hidden;
-      pointer-events: none;
-    }
-
-    .depth-layer {
-      position: absolute;
-      width: 120%;
-      height: 120%;
-      border-radius: 50%;
-      animation: float 20s ease-in-out infinite;
-      opacity: 0.12;
-      will-change: transform;
-    }
-
-    .depth-layer:nth-child(1) {
-      background: radial-gradient(circle, #0ea5e9 0%, transparent 70%);
-      top: 10%;
-      left: -10%;
-      animation-delay: 0s;
-      animation-duration: 25s;
-    }
-
-    .depth-layer:nth-child(2) {
-      background: radial-gradient(circle, #06b6d4 0%, transparent 70%);
-      bottom: 10%;
-      right: -10%;
-      animation-delay: -8s;
-      animation-duration: 30s;
-    }
-
-    .depth-layer:nth-child(3) {
-      background: radial-gradient(circle, #8b5cf6 0%, transparent 70%);
-      top: 50%;
-      left: 30%;
-      animation-delay: -15s;
-      animation-duration: 35s;
-    }
-
-    @keyframes float {
-      0%, 100% { transform: translate(0, 0) rotate(0deg) scale(1); }
-      25% { transform: translate(-20px, -30px) rotate(1deg) scale(1.05); }
-      50% { transform: translate(30px, 20px) rotate(-1deg) scale(0.95); }
-      75% { transform: translate(-10px, 40px) rotate(0.5deg) scale(1.02); }
-    }
-
-    /* Particle System */
-    .particle {
-      position: absolute;
-      width: 2px;
-      height: 2px;
-      background: #0ea5e9;
-      border-radius: 50%;
-      opacity: 0;
-      animation: particle-float 15s linear infinite;
-    }
-
-    @keyframes particle-float {
-      0% {
-        opacity: 0;
-        transform: translateY(100vh) translateX(0) scale(0);
-      }
-      10% { opacity: 1; }
-      90% { opacity: 1; }
-      100% {
-        opacity: 0;
-        transform: translateY(-100px) translateX(100px) scale(1);
-      }
-    }
-
-    /* Premium Glass Container */
-    .login-container {
-      width: min(980px, calc(100vw - 28px));
-      max-height: calc(100vh - 28px);
-      padding: 38px 34px;
-      background: var(--glass-bg);
-      backdrop-filter: blur(40px) saturate(180%);
-      border: 1px solid var(--glass-border);
-      border-radius: 32px;
-      box-shadow: var(--shadow-premium), inset 0 1px 0 rgba(255,255,255,0.05);
-      z-index: 100;
-      position: relative;
-      overflow: auto;
-      -webkit-overflow-scrolling: touch;
-      animation: containerEntrance 1.2s cubic-bezier(0.4, 0, 0.2, 1) both;
-    }
-
-    @keyframes containerEntrance {
-      0% {
-        opacity: 0;
-        transform: translateY(40px) scale(0.95);
-        filter: blur(10px);
-      }
-      100% {
-        opacity: 1;
-        transform: translateY(0) scale(1);
-        filter: blur(0);
-      }
-    }
-
-    .login-container::before {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      border-radius: 32px;
-      padding: 1px;
-      background: linear-gradient(145deg, rgba(255,255,255,0.1), rgba(255,255,255,0.02));
-      mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-      mask-composite: xor;
-      -webkit-mask-composite: xor;
-      pointer-events: none;
-    }
-
-    h1 {
-      font-size: 34px;
-      font-weight: 700;
-      letter-spacing: -1px;
-      margin-bottom: 10px;
-      background: linear-gradient(135deg, #ffffff, #cbd5e1);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-    }
-
-    h2 {
-      font-size: 20px;
-      font-weight: 650;
-      letter-spacing: -0.3px;
-      margin-top: 18px;
-      margin-bottom: 10px;
-      color: var(--text-primary);
-    }
-
-    .glass-panel {
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 20px;
-      padding: 16px 16px;
-      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
-      position: relative;
-    }
-
-    .grid-2 {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-    }
-
-    @media (max-width: 760px) {
-      .grid-2 { grid-template-columns: 1fr; }
-    }
-
-    .pill {
-      display: inline-flex;
-      align-items: center;
-      padding: 6px 10px;
-      border-radius: 999px;
-      border: 1px solid rgba(255,255,255,0.10);
-      background: rgba(14, 165, 233, 0.12);
-      color: rgba(255,255,255,0.95);
-      font-weight: 650;
-      letter-spacing: 0.2px;
-    }
-
-    .kv {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      flex-wrap: wrap;
-      align-items: center;
-      margin: 10px 0;
-    }
-
-    .kv > div { min-width: 220px; }
-
-    .row { margin: 12px 0; }
-    .muted { color: var(--text-secondary); }
-
-    code, pre {
-      background: rgba(255, 255, 255, 0.04);
-      border: 1.5px solid rgba(255, 255, 255, 0.08);
-      border-radius: 14px;
-      color: var(--text-primary);
-    }
-
-    code {
-      padding: 3px 10px;
-      display: inline-block;
-      backdrop-filter: blur(10px);
-    }
-
-    pre {
-      padding: 14px;
-      overflow-x: auto;
-      margin-top: 10px;
-    }
-
-    a { color: #7dd3fc; text-decoration: none; }
-    a:hover { color: #38bdf8; }
-
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      height: 44px;
-      padding: 0 16px;
-      border-radius: 14px;
-      border: 1px solid rgba(255,255,255,0.10);
-      background: rgba(255, 255, 255, 0.04);
-      color: var(--text-primary);
-      cursor: pointer;
-      text-decoration: none;
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-      box-shadow: 0 8px 32px rgba(14, 165, 233, 0.12);
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-    }
-
-    .btn:hover {
-      transform: translateY(-1px);
-      border-color: rgba(14, 165, 233, 0.35);
-      background: rgba(255, 255, 255, 0.06);
-      box-shadow: 0 16px 48px rgba(14, 165, 233, 0.20);
-    }
-
-    .btn:active {
-      transform: translateY(0);
-      transition-duration: 0.1s;
-    }
-
-    select {
-      background: rgba(255, 255, 255, 0.04) !important;
-      border: 1.5px solid rgba(255, 255, 255, 0.08) !important;
-      color: var(--text-primary) !important;
-      border-radius: 14px;
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-    }
-
-    table { border-collapse: collapse; width: 100%; overflow: hidden; border-radius: 14px; }
-    th, td { border-bottom: 1px solid rgba(255,255,255,0.08); padding: 10px 10px; text-align: left; }
-    th { color: var(--text-secondary); font-weight: 650; }
-
-    /* Responsive Design */
-    @media (max-width: 520px) {
-      .login-container {
-        padding: 26px 18px;
-        border-radius: 26px;
-      }
-      h1 { font-size: 28px; }
-      .btn { width: 100%; }
-    }
-
-    @media (max-height: 700px) {
-      .login-container { padding: 26px 26px; }
-    }
-
-    /* Accessibility */
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after {
-        animation-duration: 0.01ms !important;
-        animation-iteration-count: 1 !important;
-        transition-duration: 0.01ms !important;
-      }
-    }
-  </style>
-</head>
-<body>
-  <div class=\"ocean-container\" aria-hidden=\"true\">
-    <div class=\"depth-layer\"></div>
-    <div class=\"depth-layer\"></div>
-    <div class=\"depth-layer\"></div>
-  </div>
-  <div class=\"login-container\">__BODY__</div>
-  <script>
-    (() => {
-      const prefersReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      const ocean = document.querySelector('.ocean-container');
-      if (!ocean) return;
-
-      function createParticle() {
-        if (prefersReduced) return;
-        const particle = document.createElement('div');
-        particle.className = 'particle';
-        const size = Math.random() * 3 + 1;
-        particle.style.width = size + 'px';
-        particle.style.height = size + 'px';
-        particle.style.left = Math.random() * window.innerWidth + 'px';
-        particle.style.animationDelay = Math.random() * 2 + 's';
-        particle.style.animationDuration = (Math.random() * 10 + 10) + 's';
-
-        const colors = ['#0ea5e9', '#06b6d4', '#8b5cf6', '#06b6d4'];
-        particle.style.background = colors[Math.floor(Math.random() * colors.length)];
-        ocean.appendChild(particle);
-        setTimeout(() => particle.remove(), 15000);
-      }
-
-      if (!prefersReduced) {
-        setInterval(createParticle, 1500);
-        window.addEventListener('load', () => {
-          for (let i = 0; i < 8; i++) {
-            setTimeout(createParticle, i * 200);
-          }
-        });
-      }
-
-      // Mouse movement parallax for depth layers
-      if (!prefersReduced) {
-        document.addEventListener('mousemove', (e) => {
-          const layers = document.querySelectorAll('.depth-layer');
-          const x = (e.clientX / window.innerWidth) * 100;
-          const y = (e.clientY / window.innerHeight) * 100;
-          layers.forEach((layer, index) => {
-            const speed = (index + 1) * 0.5;
-            layer.style.transform = `translate(${x * speed * 0.1}px, ${y * speed * 0.1}px)`;
-          });
-        }, { passive: true });
-      }
-    })();
-  </script>
-</body>
-</html>""".replace("__TITLE__", title).replace("__BODY__", body_html)
+    global _BASE_TEMPLATE
+    if _BASE_TEMPLATE is None:
+        base_path = Path(__file__).resolve().parent / "templates" / "base.html"
+        _BASE_TEMPLATE = base_path.read_text(encoding="utf-8")
+    return _BASE_TEMPLATE.replace("__TITLE__", title).replace("__BODY__", body_html)
 
 
 def _mode_buttons() -> str:
-    modes = ["baseline", "t1", "t2", "t3", "t4"]
-    parts = []
-    for m in modes:
-        parts.append(f"<a class=\"btn\" href=\"/start?mode={m}\">Start {m.upper()}</a>")
-    return " ".join(parts)
+    def _card(mode: str, label: str) -> str:
+        return (
+            """
+<div class="mode-card">
+  <a class="btn mode-start" href="/start?mode=__MODE__">Start __LABEL__</a>
+  <button class="mode-info" type="button" data-mode="__MODE__" aria-label="Info">i</button>
+</div>
+""".replace("__MODE__", mode).replace("__LABEL__", label)
+        )
+
+    baseline = _card("baseline", "BASELINE")
+    tests = "\n".join([_card(m, m.upper()) for m in ["t1", "t2", "t3", "t4"]])
+    return (
+        '<div class="mode-baseline">'
+        + baseline
+        + "</div>"
+        + '<div class="mode-grid mode-grid-tests">'
+        + tests
+        + "</div>"
+    )
 
 
 def _read_events(events_path: Path, limit_lines: int = 2000) -> list[dict[str, Any]]:
@@ -534,15 +183,98 @@ def _summarize_session(events: list[dict[str, Any]], session: str) -> dict[str, 
 def create_app(hostname: str, store_path: Path, events_path: Path) -> FastAPI:
     app = FastAPI()
 
+    static_dir = Path(__file__).resolve().parent / "static"
+    if static_dir.exists():
+        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
-        body = f"""
+        body = """
 <h1>Mail Client Self-Test</h1>
-<p class=\"muted\">Host: <code>{hostname}</code></p>
-<div class=\"row\">{_mode_buttons()}</div>
-<p class=\"muted\">This service generates a <b>session code</b>. Use the shown <b>username</b> in your mail client so results can be matched even behind NAT/shared IPs.</p>
-<p class=\"muted\"><b>Important:</b> selecting a testcase currently sets the mode for your <b>public IP address</b>. If you share an IP (same Wi-Fi / university / company network), another user can overwrite the selected testcase for that IP.</p>
+<p class="muted">Host: <code>__HOST__</code></p>
+<div class="row">__MODE_BUTTONS__</div>
+<p class="muted">This service generates a <b>session code</b>. Use the shown <b>username</b> in your mail client so results can be matched even behind NAT/shared IPs.</p>
+<p class="muted"><b>Important:</b> selecting a testcase currently sets the mode for your <b>public IP address</b>. If you share an IP (same Wi-Fi / university / company network), another user can overwrite the selected testcase for that IP.</p>
+
+<div id="mode-modal" class="modal-backdrop" style="display:none">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title" id="mode-modal-title">Info</div>
+      <button class="modal-close" id="mode-modal-close" type="button" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body" id="mode-modal-body"></div>
+  </div>
+</div>
+
+<script>
+  const MODE_INFO = {
+    baseline: {
+      title: 'BASELINE',
+      html: '<div class="row">Normal server behavior: STARTTLS is offered (where applicable) and AUTH/LOGIN is accepted.</div>'
+    },
+    t1: {
+      title: 'T1 – STARTTLS not advertised',
+      img: '/static/T1.png',
+      html: '<div class="row">Simulation: the server does not advertise STARTTLS (capability stripping equivalent).</div>'
+    },
+    t2: {
+      title: 'T2 – TLS negotiation disrupted',
+      img: '/static/T2.png',
+      html: '<div class="row">Simulation: the server accepts STARTTLS/implicit TLS and then breaks the TLS negotiation (handshake failure-like).</div>'
+    },
+    t3: {
+      title: 'T3 – STARTTLS refused',
+      img: '/static/T3.png',
+      html: '<div class="row">Simulation: STARTTLS is advertised but rejected when requested.</div>'
+    },
+    t4: {
+      title: 'T4 – Post-handshake disruption',
+      img: '/static/T4.png',
+      html: '<div class="row">Simulation: TLS handshake succeeds, then the server injects unexpected data (e.g., NOOP) and closes.</div>'
+    }
+  };
+
+  const modal = document.getElementById('mode-modal');
+  const modalTitle = document.getElementById('mode-modal-title');
+  const modalBody = document.getElementById('mode-modal-body');
+  const modalClose = document.getElementById('mode-modal-close');
+
+  function openModeInfo(mode) {
+    const info = MODE_INFO[mode];
+    if (!info) return;
+    if (modal.parentElement !== document.body) {
+      document.body.appendChild(modal);
+    }
+    modalTitle.textContent = info.title || mode;
+    let body = info.html || '';
+    if (info.img) {
+      body = `<div class="modal-figure"><img class="mode-figure" src="${info.img}" alt="${info.title}" /></div>` + body;
+    }
+    modalBody.innerHTML = body;
+    modal.style.display = 'flex';
+  }
+
+  function closeModeInfo() {
+    modal.style.display = 'none';
+  }
+
+  document.querySelectorAll('.mode-info').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openModeInfo(btn.getAttribute('data-mode'));
+    });
+  });
+  modalClose.addEventListener('click', closeModeInfo);
+  modal.addEventListener('click', (ev) => {
+    if (ev.target === modal) closeModeInfo();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') closeModeInfo();
+  });
+</script>
 """
+        body = body.replace("__HOST__", hostname).replace("__MODE_BUTTONS__", _mode_buttons())
         return _html_page("Self-Test", body)
 
     @app.get("/start", response_class=HTMLResponse)
@@ -567,7 +299,12 @@ def create_app(hostname: str, store_path: Path, events_path: Path) -> FastAPI:
         _save_store(store_path, data)
 
         body = f"""
-<h1>Session started</h1>
+<div class="page-header">
+  <h1>Session started</h1>
+  <div class="page-actions">
+    <a class="icon-btn" href="/" aria-label="Back" title="Back">←</a>
+  </div>
+</div>
 <div class="glass-panel">
   <div class="kv">
     <div><b>Mode</b>: <span class="pill">{mode.upper()}</span></div>
@@ -589,10 +326,9 @@ def create_app(hostname: str, store_path: Path, events_path: Path) -> FastAPI:
     <h2>Setup method</h2>
     <div class="row"><label for="setup"><b>Select</b>:</label></div>
     <div class="row"><select id="setup" style="padding: 10px 12px; border-radius: 14px; width: 100%;">
-      <option value="manual" selected>Manual configuration (paper-compatible)</option>
-      <option value="srv">Autodetect without XML (DNS SRV)</option>
+      <option value="manual" selected>Manual configuration (recommended)</option>
+      <option value="autodetect">Autodetect (enter email address)</option>
     </select></div>
-    <div class="row muted">Tip: if SRV autodetect doesn't work in your client, use Manual.</div>
   </div>
 </div>
 
@@ -610,14 +346,9 @@ def create_app(hostname: str, store_path: Path, events_path: Path) -> FastAPI:
     <div class="row"><b>Optional</b>: <b>SMTP</b> host <code>{hostname}</code>, port <code>25</code>, security <b>STARTTLS</b> <span class="muted">(some clients don't use this)</span></div>
   </div>
 
-  <div id="setup-srv" style="display:none">
-    <div class="row">Use <b>autodetect</b> by entering the email address <code>{email_addr}</code> in your client.</div>
-    <div class="row muted">This relies on DNS SRV records (no XML). Client support varies.</div>
-    <pre>_imaps._tcp.{hostname}  PRI 0  WEIGHT 1  PORT 993  TARGET {hostname}.
-_imap._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 143  TARGET {hostname}.
-_submissions._tcp.{hostname} PRI 0 WEIGHT 1 PORT 465 TARGET {hostname}.
-_submission._tcp.{hostname}  PRI 0 WEIGHT 1 PORT 587 TARGET {hostname}.
-_smtp._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 25   TARGET {hostname}.</pre>
+  <div id="setup-autodetect" style="display:none">
+    <div class="row">Enter this email address in your client: <code>{email_addr}</code></div>
+    <div class="row muted">If the client proposes provider settings (e.g., Strato) or different hostnames, switch to <b>Manual configuration</b> and use the settings above.</div>
   </div>
 </div>
 
@@ -656,19 +387,23 @@ _smtp._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 25   TARGET {hostname}.</pre>
 
   const sel = document.getElementById('setup');
   const manual = document.getElementById('setup-manual');
-  const srv = document.getElementById('setup-srv');
+  const autodetect = document.getElementById('setup-autodetect');
   function apply() {{
     const v = sel.value;
     manual.style.display = (v === 'manual') ? 'block' : 'none';
-    srv.style.display = (v === 'srv') ? 'block' : 'none';
+    autodetect.style.display = (v === 'autodetect') ? 'block' : 'none';
   }}
   sel.addEventListener('change', apply);
   apply();
+
 </script>
 
+<script src="/static/toasts.js"></script>
+<script>initToasts({json.dumps(session)});</script>
+
 <div class="glass-panel" style="margin-top: 14px;">
-  <div class="row muted">After you try to login/send mail, come back and refresh the status page.</div>
-  <div class="row"><a class="btn" href="/status?session={session}">Open status page</a> <a class="btn" href="/">Back</a></div>
+  <div class="row muted">Open the status page now, then configure your mail client and try to login/send mail.</div>
+  <div class="row"><a class="btn btn-cta" href="/status?session={session}">Open status page</a></div>
 </div>
 """
         return _html_page("Session", body)
@@ -752,7 +487,14 @@ _smtp._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 25   TARGET {hostname}.</pre>
         )
 
         body = f"""
-<h1>Status</h1>
+<div class="page-header">
+  <h1>Status</h1>
+  <div class="page-actions">
+    <a class="icon-btn" href="/status?session={session}" aria-label="Reload" title="Reload">↻</a>
+    <a class="icon-btn" href="/" aria-label="Back" title="Back">←</a>
+  </div>
+</div>
+
 <div class="glass-panel">{''.join(details)}</div>
 <div style="margin-top: 12px;">{table}</div>
 
@@ -760,9 +502,12 @@ _smtp._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 25   TARGET {hostname}.</pre>
 {proto_table}
 
 <h2>Recent events</h2>
-<pre>{json.dumps(hits[-40:], indent=2)}</pre>
+<div class="glass-panel" style="max-height: 420px; overflow-y: auto; overflow-x: auto;">
+  <pre style="margin: 0;">{json.dumps(hits[-40:], indent=2)}</pre>
+</div>
 
-<div class=\"row\"><a class=\"btn\" href=\"/status?session={session}\">Refresh</a> <a class=\"btn\" href=\"/\">Back</a></div>
+<script src="/static/toasts.js"></script>
+<script>initToasts({json.dumps(session)});</script>
 """
         return _html_page("Status", body)
 
