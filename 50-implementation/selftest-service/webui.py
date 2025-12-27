@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import secrets
+import socket
 import time
 from http import HTTPStatus
 from pathlib import Path
@@ -180,7 +181,7 @@ def _summarize_session(events: list[dict[str, Any]], session: str) -> dict[str, 
     }
 
 
-def create_app(hostname: str, store_path: Path, events_path: Path) -> FastAPI:
+def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_path: Path) -> FastAPI:
     app = FastAPI()
 
     static_dir = Path(__file__).resolve().parent / "static"
@@ -191,7 +192,8 @@ def create_app(hostname: str, store_path: Path, events_path: Path) -> FastAPI:
     def index() -> str:
         body = """
 <h1>Mail Client Self-Test</h1>
-<p class="muted">Host: <code>__HOST__</code></p>
+<p class="muted">WebUI host: <code>__HOST__</code></p>
+<p class="muted">Autodetect domain: <code>__AUTODETECT__</code></p>
 <div class="row">__MODE_BUTTONS__</div>
 <p class="muted">This service generates a <b>session code</b>. Use the shown <b>username</b> in your mail client so results can be matched even behind NAT/shared IPs.</p>
 <p class="muted"><b>Important:</b> selecting a testcase currently sets the mode for your <b>public IP address</b>. If you share an IP (same Wi-Fi / university / company network), another user can overwrite the selected testcase for that IP.</p>
@@ -274,7 +276,7 @@ def create_app(hostname: str, store_path: Path, events_path: Path) -> FastAPI:
   });
 </script>
 """
-        body = body.replace("__HOST__", hostname).replace("__MODE_BUTTONS__", _mode_buttons())
+        body = body.replace("__HOST__", hostname).replace("__AUTODETECT__", autodetect_domain).replace("__MODE_BUTTONS__", _mode_buttons())
         return _html_page("Self-Test", body)
 
     @app.get("/start", response_class=HTMLResponse)
@@ -287,7 +289,9 @@ def create_app(hostname: str, store_path: Path, events_path: Path) -> FastAPI:
         ip = _client_ip(req)
         session = _new_session_code()
         username = f"test-{session}"
-        email_addr = f"{username}@{hostname}"
+        email_addr = f"{username}@{autodetect_domain}"
+        imap_host = f"imap.{autodetect_domain}"
+        smtp_host = f"smtp.{autodetect_domain}"
 
         data = _load_store(store_path)
         _prune_overrides(data)
@@ -338,17 +342,17 @@ def create_app(hostname: str, store_path: Path, events_path: Path) -> FastAPI:
   <div id="setup-manual">
     <div class="row muted"><b>Note:</b> many clients (e.g., Thunderbird) let you configure only <b>one</b> incoming and <b>one</b> outgoing server.</div>
     <div class="row"><b>Recommended (STARTTLS test, paper-default)</b>:</div>
-    <div class="row"><b>IMAP</b>: host <code>{hostname}</code>, port <code>143</code>, security <b>STARTTLS</b></div>
-    <div class="row"><b>SMTP (submission)</b>: host <code>{hostname}</code>, port <code>587</code>, security <b>STARTTLS</b></div>
+    <div class="row"><b>IMAP</b>: host <code>{imap_host}</code>, port <code>143</code>, security <b>STARTTLS</b></div>
+    <div class="row"><b>SMTP (submission)</b>: host <code>{smtp_host}</code>, port <code>587</code>, security <b>STARTTLS</b></div>
     <div class="row" style="margin-top: 14px;"><b>Optional (implicit TLS variant)</b>:</div>
-    <div class="row"><b>IMAPS</b>: host <code>{hostname}</code>, port <code>993</code>, security <b>SSL/TLS</b></div>
-    <div class="row"><b>SMTPS</b>: host <code>{hostname}</code>, port <code>465</code>, security <b>SSL/TLS</b></div>
-    <div class="row"><b>Optional</b>: <b>SMTP</b> host <code>{hostname}</code>, port <code>25</code>, security <b>STARTTLS</b> <span class="muted">(some clients don't use this)</span></div>
+    <div class="row"><b>IMAPS</b>: host <code>{imap_host}</code>, port <code>993</code>, security <b>SSL/TLS</b></div>
+    <div class="row"><b>SMTPS</b>: host <code>{smtp_host}</code>, port <code>465</code>, security <b>SSL/TLS</b></div>
+    <div class="row"><b>Optional</b>: <b>SMTP</b> host <code>{smtp_host}</code>, port <code>25</code>, security <b>STARTTLS</b> <span class="muted">(some clients don't use this)</span></div>
   </div>
 
   <div id="setup-autodetect" style="display:none">
     <div class="row">Enter this email address in your client: <code>{email_addr}</code></div>
-    <div class="row muted">If the client proposes provider settings (e.g., Strato) or different hostnames, switch to <b>Manual configuration</b> and use the settings above.</div>
+    <div class="row muted">The client should discover <code>{imap_host}</code> / <code>{smtp_host}</code>. If it proposes different providers/settings, switch to <b>Manual configuration</b> and use the settings above.</div>
   </div>
 </div>
 
@@ -568,11 +572,22 @@ def main() -> int:
     ap.add_argument("--listen-host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--hostname", default="selftest.nsipmail.de")
+    ap.add_argument("--autodetect-domain", default=(os.environ.get("NSIP_SELFTEST_AUTODETECT_DOMAIN") or ""))
     ap.add_argument("--store", default="/var/lib/nsip-selftest/mode.json")
     ap.add_argument("--events", default="/var/log/nsip-selftest/events.jsonl")
     args = ap.parse_args()
 
-    app = create_app(args.hostname, Path(args.store), Path(args.events))
+    autodetect_domain = args.autodetect_domain.strip()
+    if not autodetect_domain:
+        try:
+            ip = socket.gethostbyname(args.hostname)
+            if ip.count(".") == 3:
+                autodetect_domain = f"{ip}.nip.io"
+        except Exception:
+            autodetect_domain = ""
+    autodetect_domain = autodetect_domain or args.hostname
+
+    app = create_app(args.hostname, autodetect_domain, Path(args.store), Path(args.events))
 
     import uvicorn  # local import
 

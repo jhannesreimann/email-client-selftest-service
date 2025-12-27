@@ -103,6 +103,12 @@ def _decide_mode(mode_store_path: Path, client_ip: str) -> ModeDecision:
     return ModeDecision(mode=str(data.get("default_mode", "baseline")), source="default", session=None)
 
 
+def _should_block_implicit_tls(mode: str, server_port: int) -> bool:
+    if mode not in {"t1", "t2", "t3", "t4"}:
+        return False
+    return server_port in {465, 993}
+
+
 def _log_event(log_path: Optional[Path], event: dict[str, Any]) -> None:
     line = json.dumps(event, separators=(",", ":"))
     if log_path is None:
@@ -146,6 +152,33 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
         tls_active = isinstance(sock, ssl.SSLSocket)
         server_port = int(self.server.server_address[1])
 
+        if tls_active and _should_block_implicit_tls(dec.mode, server_port):
+            _log_event(
+                self.server.log_path,
+                {
+                    "ts": int(time.time()),
+                    "proto": "smtp",
+                    "client_ip": client_ip,
+                    "mode": dec.mode,
+                    "mode_source": dec.source,
+                    "override_session": dec.session,
+                    "session": None,
+                    "tls": tls_active,
+                    "server_port": server_port,
+                    "event": "disconnect",
+                    "reason": "implicit_tls_blocked",
+                },
+            )
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return
+
         _log_event(
             self.server.log_path,
             {
@@ -154,7 +187,8 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                 "client_ip": client_ip,
                 "mode": dec.mode,
                 "mode_source": dec.source,
-                "session": dec.session,
+                "override_session": dec.session,
+                "session": None,
                 "tls": tls_active,
                 "server_port": server_port,
                 "event": "connect",
@@ -183,7 +217,8 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                         "client_ip": client_ip,
                         "mode": dec.mode,
                         "mode_source": dec.source,
-                        "session": dec.session,
+                        "override_session": dec.session,
+                        "session": None,
                         "tls": tls_active,
                         "server_port": server_port,
                         "event": "disconnect",
@@ -227,7 +262,7 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
 
                 username = pending_auth_login_username
                 username_session = _extract_session_from_username(username) if username else None
-                session = dec.session or username_session
+                session = username_session
                 if dec.session and username_session and dec.session != username_session:
                     _log_event(
                         self.server.log_path,
@@ -240,7 +275,8 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "session_mismatch",
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "username": username,
                             "username_session": username_session,
                         },
@@ -308,7 +344,8 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                         "client_ip": client_ip,
                         "mode": dec.mode,
                         "mode_source": dec.source,
-                        "session": dec.session,
+                        "override_session": dec.session,
+                        "session": None,
                         "tls": tls_active,
                         "server_port": server_port,
                         "event": "ehlo",
@@ -333,7 +370,8 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "starttls",
@@ -351,7 +389,8 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "starttls",
@@ -371,7 +410,8 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "starttls",
@@ -386,7 +426,8 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "disconnect",
@@ -402,7 +443,8 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                         "client_ip": client_ip,
                         "mode": dec.mode,
                         "mode_source": dec.source,
-                        "session": dec.session,
+                        "override_session": dec.session,
+                        "session": None,
                         "tls": tls_active,
                         "server_port": server_port,
                         "event": "starttls",
@@ -421,7 +463,8 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "starttls",
@@ -441,7 +484,8 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "disrupt",
@@ -461,7 +505,8 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "disconnect",
@@ -525,7 +570,7 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                     continue
 
                 username_session = _extract_session_from_username(username) if username else None
-                session = dec.session or username_session
+                session = username_session
                 if dec.session and username_session and dec.session != username_session:
                     _log_event(
                         self.server.log_path,
@@ -538,7 +583,8 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "session_mismatch",
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "username": username,
                             "username_session": username_session,
                         },
@@ -577,6 +623,33 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
         tls_active = isinstance(sock, ssl.SSLSocket)
         server_port = int(self.server.server_address[1])
 
+        if tls_active and _should_block_implicit_tls(dec.mode, server_port):
+            _log_event(
+                self.server.log_path,
+                {
+                    "ts": int(time.time()),
+                    "proto": "imap",
+                    "client_ip": client_ip,
+                    "mode": dec.mode,
+                    "mode_source": dec.source,
+                    "override_session": dec.session,
+                    "session": None,
+                    "tls": tls_active,
+                    "server_port": server_port,
+                    "event": "disconnect",
+                    "reason": "implicit_tls_blocked",
+                },
+            )
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return
+
         _log_event(
             self.server.log_path,
             {
@@ -585,7 +658,8 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                 "client_ip": client_ip,
                 "mode": dec.mode,
                 "mode_source": dec.source,
-                "session": dec.session,
+                "override_session": dec.session,
+                "session": None,
                 "tls": tls_active,
                 "server_port": server_port,
                 "event": "connect",
@@ -606,7 +680,8 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                         "client_ip": client_ip,
                         "mode": dec.mode,
                         "mode_source": dec.source,
-                        "session": dec.session,
+                        "override_session": dec.session,
+                        "session": None,
                         "tls": tls_active,
                         "server_port": server_port,
                         "event": "disconnect",
@@ -635,7 +710,8 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                         "client_ip": client_ip,
                         "mode": dec.mode,
                         "mode_source": dec.source,
-                        "session": dec.session,
+                        "override_session": dec.session,
+                        "session": None,
                         "tls": tls_active,
                         "event": "capability",
                         "server_port": server_port,
@@ -659,7 +735,8 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "starttls",
@@ -677,7 +754,8 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "starttls",
@@ -695,7 +773,8 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "starttls",
@@ -715,7 +794,8 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "starttls",
@@ -730,7 +810,8 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "disconnect",
@@ -746,7 +827,8 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                         "client_ip": client_ip,
                         "mode": dec.mode,
                         "mode_source": dec.source,
-                        "session": dec.session,
+                        "override_session": dec.session,
+                        "session": None,
                         "tls": tls_active,
                         "server_port": server_port,
                         "event": "starttls",
@@ -770,7 +852,8 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "disrupt",
@@ -790,7 +873,8 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "disconnect",
@@ -839,7 +923,7 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                 except Exception:
                     username = None
                 username_session = _extract_session_from_username(username) if username else None
-                session = dec.session or username_session
+                session = username_session
                 if dec.session and username_session and dec.session != username_session:
                     _log_event(
                         self.server.log_path,
@@ -852,7 +936,8 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "session_mismatch",
-                            "session": dec.session,
+                            "override_session": dec.session,
+                            "session": None,
                             "username": username,
                             "username_session": username_session,
                         },

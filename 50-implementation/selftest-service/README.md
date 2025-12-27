@@ -44,6 +44,7 @@ Notes:
 
 - Ports `<1024` require root or capabilities.
 - The server logs `server_port` per event so you can see which port the client used.
+- In test modes `t1`–`t4`, the server intentionally **blocks implicit TLS** endpoints (`IMAPS 993`, `SMTPS 465`) by disconnecting immediately. This forces clients that prefer implicit TLS to retry on STARTTLS ports so the downgrade decision points are observable (paper-style behavior).
 
 ## Modes (testcases)
 
@@ -70,6 +71,20 @@ Required A records:
 - `smtp.selftest.nsipmail.de -> <public IP>`
 - `mail.selftest.nsipmail.de -> <public IP>`
 
+### nip.io-based autodetect domain (recommended default)
+
+Some clients (notably Thunderbird) may use a central provider database (Mozilla/Thunderbird ISPDB) and suggest hosted-provider endpoints based on the email domain. To reduce this interference, the WebUI supports using an autodetect domain derived from the server IP via **nip.io**.
+
+- The WebUI can show an email address like `test-SESSION@<public-ip>.nip.io`.
+- The corresponding hostnames used for autodetect are:
+  - `imap.<public-ip>.nip.io`
+  - `smtp.<public-ip>.nip.io`
+
+You can override the autodetect domain explicitly:
+
+- WebUI CLI: `--autodetect-domain <domain>`
+- Env var: `NSIP_SELFTEST_AUTODETECT_DOMAIN=<domain>`
+
 Important limitation:
 
 - Some clients (notably Thunderbird) may use a central provider database (Mozilla/Thunderbird ISPDB) and suggest hosted-provider endpoints even when DNS-based discovery is unavailable. This is outside the control of this service.
@@ -81,7 +96,7 @@ Important limitation:
 - Open the WebUI (e.g. `https://selftest.nsipmail.de/`).
 - Choose a testcase mode.
 - The UI shows:
-  - email address (`test-SESSION@selftest.nsipmail.de`) for autodetect,
+  - email address (`test-SESSION@<autodetect domain>`) for autodetect,
   - username (`test-SESSION`),
   - password (any value; ignored).
 
@@ -94,10 +109,9 @@ Recommended (STARTTLS test):
 - IMAP `143` STARTTLS
 - SMTP `587` STARTTLS
 
-Optional (implicit TLS variant):
+Note:
 
-- IMAPS `993` SSL/TLS
-- SMTPS `465` SSL/TLS
+- In test modes `t1`–`t4`, the service intentionally disconnects implicit TLS ports (`993`/`465`) so clients fall back to STARTTLS ports.
 
 ### 3) Trigger events
 
@@ -142,6 +156,27 @@ Expected cert paths:
 
 - `/etc/letsencrypt/live/selftest.nsipmail.de/fullchain.pem`
 - `/etc/letsencrypt/live/selftest.nsipmail.de/privkey.pem`
+
+The certificate presented by the mail self-test server must be valid for the hostnames that clients will actually connect to.
+
+At minimum, include SANs for:
+
+- `selftest.nsipmail.de`
+- `imap.selftest.nsipmail.de`
+- `smtp.selftest.nsipmail.de`
+- `mail.selftest.nsipmail.de`
+
+If you use the nip.io autodetect domain, also include SANs for the specific IP-derived names used by the WebUI, for example:
+
+- `<public-ip>.nip.io`
+- `imap.<public-ip>.nip.io`
+- `smtp.<public-ip>.nip.io`
+- `mail.<public-ip>.nip.io`
+
+If you deploy additional discovery endpoints (not enabled by default in this project), also include SANs for:
+
+- `autoconfig.<autodetect-domain>`
+- `autodiscover.<autodetect-domain>`
 
 ### systemd
 
@@ -244,8 +279,9 @@ sudo tail -n 50 /var/log/nsip-selftest/events.jsonl
 
 ### Autodetect finds the wrong provider
 
-- Prefer **Manual configuration** (host `selftest.nsipmail.de`, ports `143/587` with STARTTLS or `993/465` with SSL/TLS).
+- Prefer **Manual configuration** (ports `143/587` with STARTTLS).
 - Some clients (notably Thunderbird) may use Mozilla/Thunderbird ISPDB and propose hosted-provider endpoints (outside of this service's control).
+- If you see ISPDB interference, use the WebUI-provided nip.io-based email domain and hostnames.
 - DNS propagation/caching can delay A-record changes.
 
 ### No events show up

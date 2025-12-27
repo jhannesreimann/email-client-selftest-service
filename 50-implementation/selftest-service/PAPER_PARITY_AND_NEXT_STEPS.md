@@ -18,6 +18,12 @@ The current implementation is a **public, client-facing self-test**:
 - The user configures a mail client to connect to the selftest host and performs actions (IMAP refresh / SMTP send).
 - The mail server logs privacy-safe events (no passwords) and includes a session code derived from the username (`test-SESSION`).
 
+Implementation details that matter for interpretation:
+
+- The mode override is stored per public IP and appears in logs as `override_session` (when present).
+- The authoritative session grouping is derived from the username and appears as `session`.
+- Pre-auth events (connect/capability/ehlo/starttls) intentionally use `session=null` to avoid attributing old traffic to a new session.
+
 This setup is designed to answer:
 
 - “Does this client ever attempt **authentication without TLS** when STARTTLS is disrupted or unavailable?”
@@ -40,6 +46,11 @@ Even though the paper describes an **active MITM**, the *client-observed behavio
 - **T1 (capability stripping)**
   - Simulation: do not advertise STARTTLS in `EHLO` (SMTP) / `CAPABILITY` (IMAP).
   - Paper parity: high for the *client decision point* “STARTTLS not offered”.
+
+  Additional behavior for public self-tests:
+
+  - Many clients prefer implicit TLS ports (`IMAPS 993`, `SMTPS 465`) and would never reach the STARTTLS decision point.
+  - To keep the test focused on STARTTLS downgrade behavior, the current implementation intentionally **disconnects immediately** on implicit TLS ports in modes `t1`–`t4`. This forces clients to retry on STARTTLS ports (`143`, `587`, optionally `25`).
 
 - **T3 (reject STARTTLS with explicit error)**
   - Simulation: advertise STARTTLS, but return an error when the client issues STARTTLS.
@@ -238,6 +249,10 @@ Practical workarounds (not aligned with the strict "no client changes" goal):
 
 - **Network-side blocking** of the ISPDB host (lab/controlled network), which matches the paper's attacker assumption (blocking discovery queries).
 - Use an email domain under a different organizational domain that is not mapped in ISPDB/provider heuristics, so that the client has no ISPDB configuration to fall back to.
+
+Practical workaround implemented in the WebUI:
+
+- Use a nip.io-derived autodetect domain based on the server IP (e.g., `test-SESSION@<public-ip>.nip.io`) so the email domain is unlikely to match an ISPDB entry.
 
 Resulting scope decision for the public service:
 
