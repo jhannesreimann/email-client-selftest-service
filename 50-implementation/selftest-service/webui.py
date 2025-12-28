@@ -109,7 +109,14 @@ def _read_events(events_path: Path, limit_lines: int = 2000) -> list[dict[str, A
 
 
 def _summarize_session(events: list[dict[str, Any]], session: str) -> dict[str, Any]:
-    hits = [e for e in events if e.get("session") == session]
+    def _matches_session(e: dict[str, Any]) -> bool:
+        if e.get("session") == session:
+            return True
+        if e.get("session") is None and e.get("override_session") == session:
+            return True
+        return False
+
+    hits = [e for e in events if _matches_session(e)]
     hits = sorted(hits, key=lambda e: int(e.get("ts", 0)))
 
     auth_events = {"auth_command", "auth_login", "login_command"}
@@ -342,12 +349,12 @@ def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_p
   <div id="setup-manual">
     <div class="row muted"><b>Note:</b> many clients (e.g., Thunderbird) let you configure only <b>one</b> incoming and <b>one</b> outgoing server.</div>
     <div class="row"><b>Recommended (STARTTLS test, paper-default)</b>:</div>
-    <div class="row"><b>IMAP</b>: host <code>{imap_host}</code>, port <code>143</code>, security <b>STARTTLS</b></div>
-    <div class="row"><b>SMTP (submission)</b>: host <code>{smtp_host}</code>, port <code>587</code>, security <b>STARTTLS</b></div>
+    <div class="row"><b>IMAP</b>: host <code>{hostname}</code>, port <code>143</code>, security <b>STARTTLS</b></div>
+    <div class="row"><b>SMTP (submission)</b>: host <code>{hostname}</code>, port <code>587</code>, security <b>STARTTLS</b></div>
     <div class="row" style="margin-top: 14px;"><b>Optional (implicit TLS variant)</b>:</div>
-    <div class="row"><b>IMAPS</b>: host <code>{imap_host}</code>, port <code>993</code>, security <b>SSL/TLS</b></div>
-    <div class="row"><b>SMTPS</b>: host <code>{smtp_host}</code>, port <code>465</code>, security <b>SSL/TLS</b></div>
-    <div class="row"><b>Optional</b>: <b>SMTP</b> host <code>{smtp_host}</code>, port <code>25</code>, security <b>STARTTLS</b> <span class="muted">(some clients don't use this)</span></div>
+    <div class="row"><b>IMAPS</b>: host <code>{hostname}</code>, port <code>993</code>, security <b>SSL/TLS</b></div>
+    <div class="row"><b>SMTPS</b>: host <code>{hostname}</code>, port <code>465</code>, security <b>SSL/TLS</b></div>
+    <div class="row"><b>Optional</b>: <b>SMTP</b> host <code>{hostname}</code>, port <code>25</code>, security <b>STARTTLS</b> <span class="muted">(some clients don't use this)</span></div>
   </div>
 
   <div id="setup-autodetect" style="display:none">
