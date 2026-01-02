@@ -20,6 +20,7 @@ class ModeDecision:
     mode: str
     source: str
     session: Optional[str] = None
+    active: bool = True
 
 
 _SESSION_RE = re.compile(r"^test-([A-Za-z0-9]{6,64})$")
@@ -77,6 +78,30 @@ def _save_mode_store(path: Path, data: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def _activate_override_session(mode_store_path: Path, client_ip: str, session: str) -> None:
+    data = _load_mode_store(mode_store_path)
+    now = int(time.time())
+
+    overrides: list[dict[str, Any]] = []
+    changed = False
+    for o in data.get("overrides", []):
+        exp = int(o.get("expires", 0))
+        if exp and exp < now:
+            continue
+
+        if o.get("ip") == client_ip and str(o.get("session") or "") == session:
+            if not bool(o.get("activated", False)):
+                o = dict(o)
+                o["activated"] = True
+                o["activated_ts"] = now
+                changed = True
+        overrides.append(o)
+
+    if overrides != data.get("overrides", []) or changed:
+        data["overrides"] = overrides
+        _save_mode_store(mode_store_path, data)
+
+
 def _decide_mode(mode_store_path: Path, client_ip: str) -> ModeDecision:
     data = _load_mode_store(mode_store_path)
     now = int(time.time())
@@ -91,7 +116,14 @@ def _decide_mode(mode_store_path: Path, client_ip: str) -> ModeDecision:
         overrides.append(o)
         if o.get("ip") == client_ip and chosen is None:
             sess = o.get("session")
-            chosen = ModeDecision(mode=str(o.get("mode", "baseline")), source=f"override:{client_ip}", session=(str(sess) if sess is not None else None))
+            mode = str(o.get("mode", "baseline"))
+            session = (str(sess) if sess is not None else None)
+            activated = bool(o.get("activated", False))
+            scenario = str(o.get("scenario", "immediate") or "immediate")
+            active = True
+            if session is not None and mode in {"t1", "t2", "t3", "t4"} and scenario == "two_phase":
+                active = activated
+            chosen = ModeDecision(mode=mode, source=f"override:{client_ip}", session=session, active=active)
 
     if overrides != data.get("overrides", []):
         data["overrides"] = overrides
@@ -100,7 +132,7 @@ def _decide_mode(mode_store_path: Path, client_ip: str) -> ModeDecision:
     if chosen is not None:
         return chosen
 
-    return ModeDecision(mode=str(data.get("default_mode", "baseline")), source="default", session=None)
+    return ModeDecision(mode=str(data.get("default_mode", "baseline")), source="default", session=None, active=True)
 
 
 def _should_block_implicit_tls(mode: str, server_port: int) -> bool:
@@ -254,6 +286,7 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
 
             if pending_auth_login:
                 # AUTH LOGIN continuation (base64 username/password). We do not log/store the password.
+                was_active = dec.active
                 txt = _b64decode_to_text(line.strip())
                 if pending_auth_login_username is None:
                     pending_auth_login_username = txt or ""
@@ -297,8 +330,16 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                         "username_session": username_session,
                     },
                 )
+                if (
+                    (not was_active)
+                    and (dec.mode in {"t1", "t2", "t3", "t4"})
+                    and dec.session
+                    and username_session
+                    and (username_session == dec.session)
+                ):
+                    _activate_override_session(self.server.mode_store_path, client_ip, username_session)
                 io.send(b"235 2.7.0 Authentication successful\r\n")
-                if dec.mode in {"t4"} and tls_active:
+                if was_active and (dec.mode in {"t4"}) and tls_active:
                     _log_event(
                         self.server.log_path,
                         {
@@ -335,7 +376,7 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                 continue
 
             if u.startswith(b"EHLO") or u.startswith(b"HELO"):
-                starttls_advertised = (not tls_active) and (dec.mode not in {"t1"})
+                starttls_advertised = (not tls_active) and ((dec.mode not in {"t1"}) or (not dec.active))
                 _log_event(
                     self.server.log_path,
                     {
@@ -380,7 +421,7 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                     )
                     io.send(b"454 TLS not available due to temporary reason\r\n")
                     continue
-                if dec.mode in {"t3"}:
+                if dec.active and (dec.mode in {"t3"}):
                     _log_event(
                         self.server.log_path,
                         {
@@ -401,7 +442,7 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                     continue
 
                 io.send(b"220 2.0.0 Ready to start TLS\r\n")
-                if dec.mode in {"t2"}:
+                if dec.active and (dec.mode in {"t2"}):
                     _log_event(
                         self.server.log_path,
                         {
@@ -475,7 +516,7 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                 sock = tls_sock
                 io = _LineIO(sock)
                 tls_active = True
-                if dec.mode in {"t4"}:
+                if dec.active and (dec.mode in {"t4"}):
                     _log_event(
                         self.server.log_path,
                         {
@@ -549,6 +590,7 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
             if u.startswith(b"AUTH"):
                 # Handle common mechanisms enough to learn the username/session.
                 # Never log raw payloads (they can contain credentials).
+                was_active = dec.active
                 parts = line.split()
                 mech = parts[1].decode("utf-8", errors="replace") if len(parts) >= 2 else ""
                 mech_u = mech.upper()
@@ -606,6 +648,14 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                         "username_session": username_session,
                     },
                 )
+                if (
+                    (not was_active)
+                    and (dec.mode in {"t1", "t2", "t3", "t4"})
+                    and dec.session
+                    and username_session
+                    and (username_session == dec.session)
+                ):
+                    _activate_override_session(self.server.mode_store_path, client_ip, username_session)
                 io.send(b"235 2.7.0 Authentication successful\r\n")
                 continue
 
@@ -715,11 +765,11 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                         "tls": tls_active,
                         "event": "capability",
                         "server_port": server_port,
-                        "starttls_advertised": (not tls_active) and (dec.mode not in {"t1"}),
+                        "starttls_advertised": (not tls_active) and ((dec.mode not in {"t1"}) or (not dec.active)),
                     },
                 )
                 caps = [b"IMAP4rev1", b"AUTH=PLAIN", b"AUTH=LOGIN"]
-                if (not tls_active) and (dec.mode not in {"t1"}):
+                if (not tls_active) and ((dec.mode not in {"t1"}) or (not dec.active)):
                     caps.append(b"STARTTLS")
                 io.send(b"* CAPABILITY " + b" ".join(caps) + b"\r\n")
                 io.send(tag + b" OK CAPABILITY completed\r\n")
@@ -745,7 +795,7 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                     )
                     io.send(tag + b" BAD STARTTLS not available\r\n")
                     continue
-                if dec.mode in {"t1"}:
+                if dec.active and (dec.mode in {"t1"}):
                     _log_event(
                         self.server.log_path,
                         {
@@ -764,7 +814,7 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                     )
                     io.send(tag + b" BAD STARTTLS not available\r\n")
                     continue
-                if dec.mode in {"t3"}:
+                if dec.active and (dec.mode in {"t3"}):
                     _log_event(
                         self.server.log_path,
                         {
@@ -785,7 +835,7 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                     continue
 
                 io.send(tag + b" OK Begin TLS negotiation now\r\n")
-                if dec.mode in {"t2"}:
+                if dec.active and (dec.mode in {"t2"}):
                     _log_event(
                         self.server.log_path,
                         {
@@ -843,7 +893,7 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                 sock = tls_sock
                 io = _LineIO(sock)
                 tls_active = True
-                if dec.mode in {"t4"}:
+                if dec.active and (dec.mode in {"t4"}):
                     _log_event(
                         self.server.log_path,
                         {
@@ -913,6 +963,7 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
             if ucmd.startswith(b"LOGIN"):
                 # LOGIN typically carries username+password in cleartext on the wire.
                 # Do not log the password; only log username/session + whether TLS was active.
+                was_active = dec.active
                 username: Optional[str] = None
                 try:
                     # cmd starts with "LOGIN ..." (bytes)
@@ -958,7 +1009,15 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                         "username_session": username_session,
                     },
                 )
-                io.send(tag + b" OK Logged in\r\n")
+                if (
+                    (not was_active)
+                    and (dec.mode in {"t1", "t2", "t3", "t4"})
+                    and dec.session
+                    and username_session
+                    and (username_session == dec.session)
+                ):
+                    _activate_override_session(self.server.mode_store_path, client_ip, username_session)
+                io.send(tag + b" OK LOGIN completed\r\n")
                 continue
 
             io.send(tag + b" OK\r\n")

@@ -92,6 +92,34 @@ def _mode_buttons() -> str:
     )
 
 
+def _mode_buttons_for_scenario(scenario: str) -> str:
+    def _card(mode: str, label: str) -> str:
+        return (
+            (
+                """
+<div class="mode-card">
+  <a class="btn mode-start" href="/start?scenario=__SCENARIO__&mode=__MODE__">Start __LABEL__</a>
+  <button class="mode-info" type="button" data-mode="__MODE__" aria-label="Info">i</button>
+</div>
+"""
+            )
+            .replace("__SCENARIO__", scenario)
+            .replace("__MODE__", mode)
+            .replace("__LABEL__", label)
+        )
+
+    baseline = _card("baseline", "BASELINE")
+    tests = "\n".join([_card(m, m.upper()) for m in ["t1", "t2", "t3", "t4"]])
+    return (
+        '<div class="mode-baseline">'
+        + baseline
+        + "</div>"
+        + '<div class="mode-grid mode-grid-tests">'
+        + tests
+        + "</div>"
+    )
+
+
 def _read_events(events_path: Path, limit_lines: int = 2000) -> list[dict[str, Any]]:
     if not events_path.exists():
         return []
@@ -196,12 +224,38 @@ def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_p
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     @app.get("/", response_class=HTMLResponse)
-    def index() -> str:
-        body = """
+    def index(scenario: str = "") -> str:
+        scenario = (scenario or "").strip().lower()
+        if scenario not in {"", "immediate", "two_phase"}:
+            scenario = ""
+
+        scenario_choice = ""
+        if not scenario:
+            scenario_choice = f"""
 <h1>Mail Client Self-Test</h1>
-<p class="muted">WebUI host: <code>__HOST__</code></p>
-<p class="muted">Autodetect domain: <code>__AUTODETECT__</code></p>
-<div class="row">__MODE_BUTTONS__</div>
+<p class=\"muted\">WebUI host: <code>{hostname}</code></p>
+<p class=\"muted\">Autodetect domain: <code>{autodetect_domain}</code></p>
+
+<div class=\"glass-panel\" style=\"margin-top: 14px;\">
+  <h2>Choose scenario</h2>
+  <div class=\"row muted\">Select how the testcase should be applied: immediately during setup/autodetect, or only after the first successful login.</div>
+  <div class=\"grid-2\" style=\"margin-top: 12px;\">
+    <div class=\"mode-card\">
+      <a class=\"btn mode-start\" href=\"/?scenario=immediate\">Immediate</a>
+      <button class=\"mode-info scenario-info\" type=\"button\" data-scenario=\"immediate\" aria-label=\"Info\">i</button>
+    </div>
+    <div class=\"mode-card\">
+      <a class=\"btn mode-start\" href=\"/?scenario=two_phase\">Two-phase</a>
+      <button class=\"mode-info scenario-info\" type=\"button\" data-scenario=\"two_phase\" aria-label=\"Info\">i</button>
+    </div>
+  </div>
+  <div class=\"row muted\" style=\"margin-top: 10px;\">You will select the testcase mode on the next step.</div>
+</div>
+"""
+
+        body = """
+__SCENARIO_CHOICE__
+__MODE_SELECTION__
 <p class="muted">This service generates a <b>session code</b>. Use the shown <b>username</b> in your mail client so results can be matched even behind NAT/shared IPs.</p>
 <p class="muted"><b>Important:</b> selecting a testcase currently sets the mode for your <b>public IP address</b>. If you share an IP (same Wi-Fi / university / company network), another user can overwrite the selected testcase for that IP.</p>
 
@@ -216,6 +270,17 @@ def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_p
 </div>
 
 <script>
+  const SCENARIO_INFO = {
+    immediate: {
+      title: 'Immediate scenario',
+      html: `<div class="row"><b>Attack scenario:</b> an active attacker (MITM) is already present during account setup / autodetect, so the testcase affects what the client decides and stores as its security settings.</div><div class="row">The selected testcase is active immediately, including during autodetect / account setup.</div><div class="row muted"><b>Implication:</b> this is the stricter / more pessimistic scenario. If the client downgrades to insecure settings (e.g., chooses "No encryption" in T1) or sends credentials without TLS, the client is vulnerable to downgrade attacks during setup and may permanently store unsafe configuration. If the client still enforces TLS despite disruptions, it is more robust.</div>`
+    },
+    two_phase: {
+      title: 'Two-phase scenario',
+      html: `<div class="row"><b>Attack scenario:</b> initial setup happens without interference (you can complete a normal, secure login once). Only afterwards, an active attacker appears and tries to force downgrade / break STARTTLS on later connections.</div><div class="row">Setup behaves like BASELINE until your first successful login/auth for this session.</div><div class="row muted"><b>Implication:</b> this isolates the client's behavior after it already had a secure baseline. A secure client should refuse to send credentials without TLS even if STARTTLS is stripped/refused/broken later. If the client falls back to plaintext auth after the attacker appears, it is vulnerable to post-setup downgrade attacks (credentials exposure on subsequent reconnects/sends).</div>`
+    }
+  };
+
   const MODE_INFO = {
     baseline: {
       title: 'BASELINE',
@@ -229,7 +294,7 @@ def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_p
     t2: {
       title: 'T2 – TLS negotiation disrupted',
       img: '/static/T2.png',
-      html: '<div class="row">Simulation: the server accepts STARTTLS/implicit TLS and then breaks the TLS negotiation (handshake failure-like).</div>'
+      html: '<div class="row">Simulation: the server accepts STARTTLS and then breaks the TLS negotiation (handshake failure-like).</div>'
     },
     t3: {
       title: 'T3 – STARTTLS refused',
@@ -263,6 +328,17 @@ def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_p
     modal.style.display = 'flex';
   }
 
+  function openScenarioInfo(scenario) {
+    const info = SCENARIO_INFO[scenario];
+    if (!info) return;
+    if (modal.parentElement !== document.body) {
+      document.body.appendChild(modal);
+    }
+    modalTitle.textContent = info.title || scenario;
+    modalBody.innerHTML = info.html || '';
+    modal.style.display = 'flex';
+  }
+
   function closeModeInfo() {
     modal.style.display = 'none';
   }
@@ -274,6 +350,14 @@ def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_p
       openModeInfo(btn.getAttribute('data-mode'));
     });
   });
+
+  document.querySelectorAll('.scenario-info').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openScenarioInfo(btn.getAttribute('data-scenario'));
+    });
+  });
   modalClose.addEventListener('click', closeModeInfo);
   modal.addEventListener('click', (ev) => {
     if (ev.target === modal) closeModeInfo();
@@ -283,15 +367,39 @@ def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_p
   });
 </script>
 """
-        body = body.replace("__HOST__", hostname).replace("__AUTODETECT__", autodetect_domain).replace("__MODE_BUTTONS__", _mode_buttons())
+
+        mode_selection = ""
+        if scenario:
+            mode_selection = f"""\
+<div class=\"page-header\">\
+  <h1>Mail Client Self-Test</h1>\
+  <div class=\"page-actions\">\
+    <span class=\"pill\">{scenario}</span>\
+    <a class=\"icon-btn\" href=\"/\" aria-label=\"Back\" title=\"Back\">←</a>\
+  </div>\
+</div>\
+<p class=\"muted\">WebUI host: <code>{hostname}</code></p>
+<p class=\"muted\">Autodetect domain: <code>{autodetect_domain}</code></p>
+<div class=\"row\">__MODE_BUTTONS__</div>
+"""
+
+        body = (
+            body.replace("__SCENARIO_CHOICE__", scenario_choice)
+            .replace("__MODE_SELECTION__", mode_selection)
+            .replace("__MODE_BUTTONS__", _mode_buttons_for_scenario(scenario) if scenario else "")
+        )
         return _html_page("Self-Test", body)
 
     @app.get("/start", response_class=HTMLResponse)
-    def start(req: Request, mode: str = "baseline", ttl: int = 900) -> str:
+    def start(req: Request, mode: str = "baseline", ttl: int = 900, scenario: str = "immediate") -> str:
         if mode not in {"baseline", "t1", "t2", "t3", "t4"}:
             return _html_page("Bad Request", "<h1>Invalid mode</h1>")
         if ttl < 60 or ttl > 3600:
             return _html_page("Bad Request", "<h1>Invalid ttl</h1><p>Use 60..3600 seconds.</p>")
+
+        scenario = (scenario or "").strip().lower()
+        if scenario not in {"immediate", "two_phase"}:
+            return _html_page("Bad Request", "<h1>Invalid scenario</h1>")
 
         ip = _client_ip(req)
         session = _new_session_code()
@@ -305,7 +413,7 @@ def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_p
         now = int(time.time())
         expires = now + ttl
         overrides = [o for o in data.get("overrides", []) if o.get("ip") != ip]
-        overrides.append({"ip": ip, "mode": mode, "expires": expires, "session": session})
+        overrides.append({"ip": ip, "mode": mode, "expires": expires, "session": session, "scenario": scenario})
         data["overrides"] = overrides
         _save_store(store_path, data)
 
@@ -319,6 +427,7 @@ def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_p
 <div class="glass-panel">
   <div class="kv">
     <div><b>Mode</b>: <span class="pill">{mode.upper()}</span></div>
+    <div><b>Scenario</b>: <span class="pill">{scenario}</span></div>
     <div><b>Time remaining</b>: <code><span id="ttl-remaining">...</span></code> <a class="btn" id="ttl-extend" href="#">Extend +15m</a></div>
   </div>
   <div class="row"><b>Your public IP</b>: <code>{ip}</code></div>
@@ -541,11 +650,16 @@ def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_p
         overrides: list[dict[str, Any]] = []
         cur_expires: Optional[int] = None
         cur_session: Optional[str] = None
+        cur_scenario: Optional[str] = None
+        cur_activated: Optional[bool] = None
         for o in data.get("overrides", []):
             if o.get("ip") == ip:
                 cur_expires = int(o.get("expires", 0))
                 s = o.get("session")
                 cur_session = str(s) if s is not None else None
+                cur_scenario = str(o.get("scenario") or "") or None
+                if "activated" in o:
+                    cur_activated = bool(o.get("activated"))
                 continue
             overrides.append(o)
 
@@ -555,7 +669,12 @@ def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_p
         if new_expires > hard_cap:
             new_expires = hard_cap
 
-        overrides.append({"ip": ip, "mode": mode, "expires": new_expires, "session": (cur_session or session)})
+        entry: dict[str, Any] = {"ip": ip, "mode": mode, "expires": new_expires, "session": (cur_session or session)}
+        if cur_scenario is not None:
+            entry["scenario"] = cur_scenario
+        if cur_activated is not None:
+            entry["activated"] = cur_activated
+        overrides.append(entry)
         data["overrides"] = overrides
         _save_store(store_path, data)
 
