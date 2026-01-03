@@ -4,25 +4,42 @@ import argparse
 import json
 import os
 import secrets
+import socket
 import time
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 
 def _load_store(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return {"default_mode": "baseline", "overrides": []}
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+        return {"default_mode": "baseline", "overrides": [], "guided_runs": {}}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(raw.lstrip())
+            if isinstance(obj, dict):
+                if "guided_runs" not in obj:
+                    obj["guided_runs"] = {}
+                _save_store(path, obj)
+                return obj
+        except Exception:
+            pass
+        fallback: dict[str, Any] = {"default_mode": "baseline", "overrides": [], "guided_runs": {}}
+        _save_store(path, fallback)
+        return fallback
 
 
 def _save_store(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{secrets.token_hex(6)}.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f)
     os.replace(tmp, path)
@@ -56,390 +73,276 @@ def _new_session_code() -> str:
     return (cleaned[:10] or "X")
 
 
+def _guided_steps() -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    out.append({"scenario": "immediate", "mode": "baseline", "label": "Baseline"})
+    for m in ["t1", "t2", "t3", "t4"]:
+        out.append({"scenario": "immediate", "mode": m, "label": f"Immediate {m.upper()}"})
+    for m in ["t1", "t2", "t3", "t4"]:
+        out.append({"scenario": "two_phase", "mode": m, "label": f"Two-phase {m.upper()}"})
+    return out
+
+
+def _guided_new_run_id() -> str:
+    return "".join(ch for ch in secrets.token_urlsafe(12) if ch.isalnum())[:16]
+
+
+def _guided_findings(summary: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    if bool(summary.get("saw_plain")):
+        out.append("plaintext_auth")
+    if bool(summary.get("saw_tls_auth")):
+        out.append("tls_auth")
+    if bool(summary.get("retry_like")):
+        out.append("retry_like")
+    if int(summary.get("starttls_refused_like") or 0) > 0:
+        out.append("starttls_disrupted")
+    return out
+
+
+def _guided_detect_post_activation(events: list[dict[str, Any]]) -> bool:
+    auth_events = {"auth_command", "auth_login", "login_command"}
+    first_auth_idx: Optional[int] = None
+    for i, e in enumerate(events):
+        if e.get("event") in auth_events and e.get("tls") is True:
+            first_auth_idx = i
+            break
+    if first_auth_idx is None:
+        return False
+    for e in events[first_auth_idx + 1 :]:
+        if e.get("event") in {"connect", "starttls", "disrupt", "drop", "disconnect"}:
+            return True
+    return False
+
+
+def _guided_milestones(step: dict[str, Any], summary: dict[str, Any]) -> list[dict[str, Any]]:
+    smtp = summary.get("smtp", {})
+    imap = summary.get("imap", {})
+    retry_like = bool(summary.get("retry_like"))
+    starttls_refused_like = int(summary.get("starttls_refused_like") or 0)
+    saw_any_auth = bool(summary.get("saw_plain")) or bool(summary.get("saw_tls_auth"))
+
+    imap_connect = int(imap.get("connects") or 0) >= 1
+    smtp_attempt = int(smtp.get("connects") or 0) >= 1
+    imap_activity = saw_any_auth or int(imap.get("starttls") or 0) > 0 or retry_like or starttls_refused_like > 0
+
+    milestones: list[dict[str, Any]] = []
+    milestones.append({"key": "imap_connect", "ok": imap_connect, "label": "IMAP connection observed"})
+    milestones.append({"key": "imap_activity", "ok": imap_activity, "label": "IMAP activity observed"})
+
+    if str(step.get("scenario")) == "two_phase":
+        activation = bool(summary.get("saw_tls_auth"))
+        post_activation = _guided_detect_post_activation(list(summary.get("events") or []))
+        milestones.append({"key": "activation", "ok": activation, "label": "Successful TLS login observed"})
+        milestones.append({"key": "post_activation", "ok": post_activation, "label": "Follow-up attempt after login observed"})
+
+    milestones.append({"key": "smtp_attempt", "ok": smtp_attempt, "label": "SMTP connection observed"})
+    return milestones
+
+
+def _guided_step_progress(step: dict[str, Any], summary: dict[str, Any], prev: dict[str, bool]) -> tuple[float, Optional[str], dict[str, bool], list[str]]:
+    milestones = _guided_milestones(step, summary)
+    keys = [str(m["key"]) for m in milestones]
+    now_flags: dict[str, bool] = {k: False for k in keys}
+    for m in milestones:
+        now_flags[str(m["key"])] = bool(m.get("ok"))
+
+    total = len(keys)
+    done = sum(1 for k in keys if now_flags.get(k))
+    fill = (done / total) if total else 0.0
+
+    reason: Optional[str] = None
+    for m in milestones:
+        k = str(m["key"])
+        if bool(m.get("ok")) and not bool(prev.get(k)):
+            reason = str(m.get("label") or k)
+
+    missing = [str(m.get("label") or m.get("key")) for m in milestones if not bool(m.get("ok"))]
+    return min(0.99, max(0.0, fill)), reason, now_flags, missing
+
+
+def _guided_set_override(data: dict[str, Any], ip: str, mode: str, scenario: str, session: str, ttl: int = 900) -> int:
+    now = int(time.time())
+    expires = now + int(ttl)
+    overrides = [o for o in data.get("overrides", []) if o.get("ip") != ip]
+    overrides.append({"ip": ip, "mode": mode, "expires": expires, "session": session, "scenario": scenario})
+    data["overrides"] = overrides
+    return expires
+
+
+def _esc_html(s: str) -> str:
+    return (
+        (s or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+
+_COPY_SVG = (
+    "<svg viewBox=\"0 0 24 24\" width=\"16\" height=\"16\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\">"
+    "<path d=\"M8 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"/>"
+    "<path d=\"M6 20h8a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2Z\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"/>"
+    "</svg>"
+)
+
+
+def _copy_button(copy_text: str, title: str = "Copy") -> str:
+    t = _esc_html(copy_text)
+    tt = _esc_html(title)
+    return f"<button type=\"button\" class=\"icon-btn copy-btn\" data-copy=\"{t}\" title=\"{tt}\" aria-label=\"{tt}\">{_COPY_SVG}</button>"
+
+
+def _copy_script() -> str:
+    return """
+<script>
+  (() => {
+    async function copyText(s) {
+      if (!s) return;
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(s);
+          return;
+        }
+      } catch (e) {}
+
+      const ta = document.createElement('textarea');
+      ta.value = s;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      ta.style.top = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch (e) {}
+      ta.remove();
+    }
+
+    document.addEventListener('click', (ev) => {
+      const btn = ev.target && ev.target.closest ? ev.target.closest('.copy-btn') : null;
+      if (!btn) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      copyText(btn.getAttribute('data-copy') || '');
+    });
+  })();
+</script>
+"""
+
+
+def _guided_results_html(run: dict[str, Any]) -> str:
+    steps = list(run.get("steps") or [])
+    rows: list[str] = []
+    rows.append("<tr><th>#</th><th>Scenario</th><th>Testcase</th><th>Verdict</th><th>Findings</th><th>Details</th></tr>")
+    for i, s in enumerate(steps):
+        res = s.get("result") or {}
+        verdict = str(res.get("verdict") or "INCONCLUSIVE")
+
+        pill_class = "pill"
+        if verdict.startswith("PASS"):
+            pill_class += " pill-pass"
+        elif verdict.startswith("FAIL"):
+            pill_class += " pill-fail"
+
+        findings = list(res.get("findings") or [])
+        findings_html = " ".join([f"<span class=\"badge\">{_esc_html(str(f))}</span>" for f in findings])
+        if not findings_html:
+            findings_html = "<span class=\"muted\">(none)</span>"
+
+        detail = res.get("detail") or {}
+        smtp = detail.get("smtp") or {}
+        imap = detail.get("imap") or {}
+
+        session = str(s.get("session") or "")
+        log_link = ""
+        if session:
+            log_link = f"<div class=\"row\" style=\"margin-top: 10px;\"><a class=\"btn btn-small\" href=\"/status?session={_esc_html(session)}\" target=\"_blank\" rel=\"noopener\">View logs</a></div>"
+
+        detail_html = (
+            "<details>"
+            "<summary>Show</summary>"
+            + f"<div class=\"row muted\"><b>IMAP</b> connects={_esc_html(str(imap.get('connects')))} starttls={_esc_html(str(imap.get('starttls_results')))} auth_tls={_esc_html(str(imap.get('auth_tls')))} auth_plain={_esc_html(str(imap.get('auth_plain')))}</div>"
+            + f"<div class=\"row muted\"><b>SMTP</b> connects={_esc_html(str(smtp.get('connects')))} starttls={_esc_html(str(smtp.get('starttls_results')))} auth_tls={_esc_html(str(smtp.get('auth_tls')))} auth_plain={_esc_html(str(smtp.get('auth_plain')))}</div>"
+            + log_link
+            + "</details>"
+        )
+
+        rows.append(
+            "<tr>"
+            + f"<td>{i+1}</td>"
+            + f"<td><code>{_esc_html(str(s.get('scenario') or ''))}</code></td>"
+            + f"<td><code>{_esc_html(str(s.get('mode') or ''))}</code></td>"
+            + f"<td><span class=\"{pill_class}\">{_esc_html(verdict)}</span></td>"
+            + f"<td>{findings_html}</td>"
+            + f"<td>{detail_html}</td>"
+            + "</tr>"
+        )
+
+    headline = "COMPLETED" if run.get("status") == "completed" else "ABORTED"
+    return f"<h2>{headline}</h2><table>" + "".join(rows) + "</table>"
+
+
+_BASE_TEMPLATE: Optional[str] = None
+
+
 def _html_page(title: str, body_html: str) -> str:
-    return """<!doctype html>
-<html lang=\"en\">
-<head>
-  <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <title>__TITLE__</title>
-  <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    :root {
-      color-scheme: dark;
-      --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      --ocean-primary: #0f172a;
-      --ocean-secondary: #1e293b;
-      --ocean-accent: #0ea5e9;
-      --glass-bg: rgba(255, 255, 255, 0.03);
-      --glass-border: rgba(255, 255, 255, 0.08);
-      --text-primary: #ffffff;
-      --text-secondary: rgba(255, 255, 255, 0.7);
-      --shadow-premium: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
-    }
-
-    html, body { height: 100%; }
-
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
-      min-height: 100vh;
-      background: radial-gradient(ellipse at bottom, var(--ocean-secondary) 0%, var(--ocean-primary) 100%);
-      position: relative;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: var(--text-primary);
-      overflow: hidden;
-      line-height: 1.5;
-    }
-
-    /* Dynamic Ocean Background */
-    .ocean-container {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      z-index: 0;
-      overflow: hidden;
-      pointer-events: none;
-    }
-
-    .depth-layer {
-      position: absolute;
-      width: 120%;
-      height: 120%;
-      border-radius: 50%;
-      animation: float 20s ease-in-out infinite;
-      opacity: 0.12;
-      will-change: transform;
-    }
-
-    .depth-layer:nth-child(1) {
-      background: radial-gradient(circle, #0ea5e9 0%, transparent 70%);
-      top: 10%;
-      left: -10%;
-      animation-delay: 0s;
-      animation-duration: 25s;
-    }
-
-    .depth-layer:nth-child(2) {
-      background: radial-gradient(circle, #06b6d4 0%, transparent 70%);
-      bottom: 10%;
-      right: -10%;
-      animation-delay: -8s;
-      animation-duration: 30s;
-    }
-
-    .depth-layer:nth-child(3) {
-      background: radial-gradient(circle, #8b5cf6 0%, transparent 70%);
-      top: 50%;
-      left: 30%;
-      animation-delay: -15s;
-      animation-duration: 35s;
-    }
-
-    @keyframes float {
-      0%, 100% { transform: translate(0, 0) rotate(0deg) scale(1); }
-      25% { transform: translate(-20px, -30px) rotate(1deg) scale(1.05); }
-      50% { transform: translate(30px, 20px) rotate(-1deg) scale(0.95); }
-      75% { transform: translate(-10px, 40px) rotate(0.5deg) scale(1.02); }
-    }
-
-    /* Particle System */
-    .particle {
-      position: absolute;
-      width: 2px;
-      height: 2px;
-      background: #0ea5e9;
-      border-radius: 50%;
-      opacity: 0;
-      animation: particle-float 15s linear infinite;
-    }
-
-    @keyframes particle-float {
-      0% {
-        opacity: 0;
-        transform: translateY(100vh) translateX(0) scale(0);
-      }
-      10% { opacity: 1; }
-      90% { opacity: 1; }
-      100% {
-        opacity: 0;
-        transform: translateY(-100px) translateX(100px) scale(1);
-      }
-    }
-
-    /* Premium Glass Container */
-    .login-container {
-      width: min(980px, calc(100vw - 28px));
-      max-height: calc(100vh - 28px);
-      padding: 38px 34px;
-      background: var(--glass-bg);
-      backdrop-filter: blur(40px) saturate(180%);
-      border: 1px solid var(--glass-border);
-      border-radius: 32px;
-      box-shadow: var(--shadow-premium), inset 0 1px 0 rgba(255,255,255,0.05);
-      z-index: 100;
-      position: relative;
-      overflow: auto;
-      -webkit-overflow-scrolling: touch;
-      animation: containerEntrance 1.2s cubic-bezier(0.4, 0, 0.2, 1) both;
-    }
-
-    @keyframes containerEntrance {
-      0% {
-        opacity: 0;
-        transform: translateY(40px) scale(0.95);
-        filter: blur(10px);
-      }
-      100% {
-        opacity: 1;
-        transform: translateY(0) scale(1);
-        filter: blur(0);
-      }
-    }
-
-    .login-container::before {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      border-radius: 32px;
-      padding: 1px;
-      background: linear-gradient(145deg, rgba(255,255,255,0.1), rgba(255,255,255,0.02));
-      mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-      mask-composite: xor;
-      -webkit-mask-composite: xor;
-      pointer-events: none;
-    }
-
-    h1 {
-      font-size: 34px;
-      font-weight: 700;
-      letter-spacing: -1px;
-      margin-bottom: 10px;
-      background: linear-gradient(135deg, #ffffff, #cbd5e1);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-    }
-
-    h2 {
-      font-size: 20px;
-      font-weight: 650;
-      letter-spacing: -0.3px;
-      margin-top: 18px;
-      margin-bottom: 10px;
-      color: var(--text-primary);
-    }
-
-    .glass-panel {
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 20px;
-      padding: 16px 16px;
-      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
-      position: relative;
-    }
-
-    .grid-2 {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-    }
-
-    @media (max-width: 760px) {
-      .grid-2 { grid-template-columns: 1fr; }
-    }
-
-    .pill {
-      display: inline-flex;
-      align-items: center;
-      padding: 6px 10px;
-      border-radius: 999px;
-      border: 1px solid rgba(255,255,255,0.10);
-      background: rgba(14, 165, 233, 0.12);
-      color: rgba(255,255,255,0.95);
-      font-weight: 650;
-      letter-spacing: 0.2px;
-    }
-
-    .kv {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      flex-wrap: wrap;
-      align-items: center;
-      margin: 10px 0;
-    }
-
-    .kv > div { min-width: 220px; }
-
-    .row { margin: 12px 0; }
-    .muted { color: var(--text-secondary); }
-
-    code, pre {
-      background: rgba(255, 255, 255, 0.04);
-      border: 1.5px solid rgba(255, 255, 255, 0.08);
-      border-radius: 14px;
-      color: var(--text-primary);
-    }
-
-    code {
-      padding: 3px 10px;
-      display: inline-block;
-      backdrop-filter: blur(10px);
-    }
-
-    pre {
-      padding: 14px;
-      overflow-x: auto;
-      margin-top: 10px;
-    }
-
-    a { color: #7dd3fc; text-decoration: none; }
-    a:hover { color: #38bdf8; }
-
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      height: 44px;
-      padding: 0 16px;
-      border-radius: 14px;
-      border: 1px solid rgba(255,255,255,0.10);
-      background: rgba(255, 255, 255, 0.04);
-      color: var(--text-primary);
-      cursor: pointer;
-      text-decoration: none;
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-      box-shadow: 0 8px 32px rgba(14, 165, 233, 0.12);
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-    }
-
-    .btn:hover {
-      transform: translateY(-1px);
-      border-color: rgba(14, 165, 233, 0.35);
-      background: rgba(255, 255, 255, 0.06);
-      box-shadow: 0 16px 48px rgba(14, 165, 233, 0.20);
-    }
-
-    .btn:active {
-      transform: translateY(0);
-      transition-duration: 0.1s;
-    }
-
-    select {
-      background: rgba(255, 255, 255, 0.04) !important;
-      border: 1.5px solid rgba(255, 255, 255, 0.08) !important;
-      color: var(--text-primary) !important;
-      border-radius: 14px;
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-    }
-
-    table { border-collapse: collapse; width: 100%; overflow: hidden; border-radius: 14px; }
-    th, td { border-bottom: 1px solid rgba(255,255,255,0.08); padding: 10px 10px; text-align: left; }
-    th { color: var(--text-secondary); font-weight: 650; }
-
-    /* Responsive Design */
-    @media (max-width: 520px) {
-      .login-container {
-        padding: 26px 18px;
-        border-radius: 26px;
-      }
-      h1 { font-size: 28px; }
-      .btn { width: 100%; }
-    }
-
-    @media (max-height: 700px) {
-      .login-container { padding: 26px 26px; }
-    }
-
-    /* Accessibility */
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after {
-        animation-duration: 0.01ms !important;
-        animation-iteration-count: 1 !important;
-        transition-duration: 0.01ms !important;
-      }
-    }
-  </style>
-</head>
-<body>
-  <div class=\"ocean-container\" aria-hidden=\"true\">
-    <div class=\"depth-layer\"></div>
-    <div class=\"depth-layer\"></div>
-    <div class=\"depth-layer\"></div>
-  </div>
-  <div class=\"login-container\">__BODY__</div>
-  <script>
-    (() => {
-      const prefersReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      const ocean = document.querySelector('.ocean-container');
-      if (!ocean) return;
-
-      function createParticle() {
-        if (prefersReduced) return;
-        const particle = document.createElement('div');
-        particle.className = 'particle';
-        const size = Math.random() * 3 + 1;
-        particle.style.width = size + 'px';
-        particle.style.height = size + 'px';
-        particle.style.left = Math.random() * window.innerWidth + 'px';
-        particle.style.animationDelay = Math.random() * 2 + 's';
-        particle.style.animationDuration = (Math.random() * 10 + 10) + 's';
-
-        const colors = ['#0ea5e9', '#06b6d4', '#8b5cf6', '#06b6d4'];
-        particle.style.background = colors[Math.floor(Math.random() * colors.length)];
-        ocean.appendChild(particle);
-        setTimeout(() => particle.remove(), 15000);
-      }
-
-      if (!prefersReduced) {
-        setInterval(createParticle, 1500);
-        window.addEventListener('load', () => {
-          for (let i = 0; i < 8; i++) {
-            setTimeout(createParticle, i * 200);
-          }
-        });
-      }
-
-      // Mouse movement parallax for depth layers
-      if (!prefersReduced) {
-        document.addEventListener('mousemove', (e) => {
-          const layers = document.querySelectorAll('.depth-layer');
-          const x = (e.clientX / window.innerWidth) * 100;
-          const y = (e.clientY / window.innerHeight) * 100;
-          layers.forEach((layer, index) => {
-            const speed = (index + 1) * 0.5;
-            layer.style.transform = `translate(${x * speed * 0.1}px, ${y * speed * 0.1}px)`;
-          });
-        }, { passive: true });
-      }
-    })();
-  </script>
-</body>
-</html>""".replace("__TITLE__", title).replace("__BODY__", body_html)
+    global _BASE_TEMPLATE
+    if _BASE_TEMPLATE is None:
+        base_path = Path(__file__).resolve().parent / "templates" / "base.html"
+        _BASE_TEMPLATE = base_path.read_text(encoding="utf-8")
+    return _BASE_TEMPLATE.replace("__TITLE__", title).replace("__BODY__", body_html)
 
 
 def _mode_buttons() -> str:
-    modes = ["baseline", "t1", "t2", "t3", "t4"]
-    parts = []
-    for m in modes:
-        parts.append(f"<a class=\"btn\" href=\"/start?mode={m}\">Start {m.upper()}</a>")
-    return " ".join(parts)
+    def _card(mode: str, label: str) -> str:
+        return (
+            """
+<div class="mode-card">
+  <a class="btn mode-start" href="/start?mode=__MODE__">Start __LABEL__</a>
+  <button class="mode-info" type="button" data-mode="__MODE__" aria-label="Info">i</button>
+</div>
+""".replace("__MODE__", mode).replace("__LABEL__", label)
+        )
+
+    baseline = _card("baseline", "BASELINE")
+    tests = "\n".join([_card(m, m.upper()) for m in ["t1", "t2", "t3", "t4"]])
+    return (
+        '<div class="mode-baseline">'
+        + baseline
+        + "</div>"
+        + '<div class="mode-grid mode-grid-tests">'
+        + tests
+        + "</div>"
+    )
+
+
+def _mode_buttons_for_scenario(scenario: str) -> str:
+    def _card(mode: str, label: str) -> str:
+        return (
+            (
+                """
+<div class="mode-card">
+  <a class="btn mode-start" href="/start?scenario=__SCENARIO__&mode=__MODE__">Start __LABEL__</a>
+  <button class="mode-info" type="button" data-mode="__MODE__" aria-label="Info">i</button>
+</div>
+"""
+            )
+            .replace("__SCENARIO__", scenario)
+            .replace("__MODE__", mode)
+            .replace("__LABEL__", label)
+        )
+
+    baseline = _card("baseline", "BASELINE")
+    tests = "\n".join([_card(m, m.upper()) for m in ["t1", "t2", "t3", "t4"]])
+    return (
+        '<div class="mode-baseline">'
+        + baseline
+        + "</div>"
+        + '<div class="mode-grid mode-grid-tests">'
+        + tests
+        + "</div>"
+    )
 
 
 def _read_events(events_path: Path, limit_lines: int = 2000) -> list[dict[str, Any]]:
@@ -458,46 +361,567 @@ def _read_events(events_path: Path, limit_lines: int = 2000) -> list[dict[str, A
     return out
 
 
-def create_app(hostname: str, store_path: Path, events_path: Path) -> FastAPI:
+def _summarize_session(events: list[dict[str, Any]], session: str) -> dict[str, Any]:
+    def _matches_session(e: dict[str, Any]) -> bool:
+        if e.get("session") == session:
+            return True
+        if e.get("session") is None and e.get("override_session") == session:
+            return True
+        return False
+
+    hits = [e for e in events if _matches_session(e)]
+    hits = sorted(hits, key=lambda e: int(e.get("ts", 0)))
+
+    auth_events = {"auth_command", "auth_login", "login_command"}
+    connect_events = {"connect"}
+    disconnect_events = {"disconnect"}
+
+    def _proto_summary(proto: str) -> dict[str, Any]:
+        proto_hits = [e for e in hits if e.get("proto") == proto]
+        ports = sorted({int(e.get("server_port")) for e in proto_hits if isinstance(e.get("server_port"), int) or str(e.get("server_port", "")).isdigit()})
+        connects = [e for e in proto_hits if e.get("event") in connect_events]
+        disconnects = [e for e in proto_hits if e.get("event") in disconnect_events]
+        auth_plain = [e for e in proto_hits if (e.get("event") in auth_events) and (e.get("tls") is False)]
+        auth_tls = [e for e in proto_hits if (e.get("event") in auth_events) and (e.get("tls") is True)]
+        starttls = [e for e in proto_hits if e.get("event") == "starttls"]
+        starttls_results: dict[str, int] = {}
+        for s in starttls:
+            r = str(s.get("result") or "unknown")
+            starttls_results[r] = starttls_results.get(r, 0) + 1
+
+        return {
+            "ports": ports,
+            "connects": len(connects),
+            "disconnects": len(disconnects),
+            "auth_plain": len(auth_plain),
+            "auth_tls": len(auth_tls),
+            "starttls": len(starttls),
+            "starttls_results": starttls_results,
+            "last_ts": int(proto_hits[-1].get("ts", 0)) if proto_hits else None,
+        }
+
+    smtp = _proto_summary("smtp")
+    imap = _proto_summary("imap")
+
+    saw_plain = (smtp["auth_plain"] + imap["auth_plain"]) > 0
+    saw_tls_auth = (smtp["auth_tls"] + imap["auth_tls"]) > 0
+    saw_any_auth = saw_plain or saw_tls_auth
+
+    connects_total = int(smtp["connects"]) + int(imap["connects"])
+    disconnects_total = int(smtp["disconnects"]) + int(imap["disconnects"])
+    retry_like = connects_total >= 6 and not saw_any_auth
+
+    starttls_refused_like = (
+        smtp["starttls_results"].get("refused", 0)
+        + smtp["starttls_results"].get("drop_after_ready", 0)
+        + smtp["starttls_results"].get("wrap_failed", 0)
+        + imap["starttls_results"].get("refused", 0)
+        + imap["starttls_results"].get("drop_after_ok", 0)
+    )
+
+    if saw_plain:
+        verdict = "FAIL"
+    elif saw_tls_auth:
+        verdict = "PASS"
+    else:
+        verdict = "INCONCLUSIVE"
+
+    return {
+        "session": session,
+        "events": hits,
+        "verdict": verdict,
+        "saw_plain": saw_plain,
+        "saw_tls_auth": saw_tls_auth,
+        "retry_like": retry_like,
+        "starttls_refused_like": int(starttls_refused_like),
+        "smtp": smtp,
+        "imap": imap,
+        "first_ts": int(hits[0].get("ts", 0)) if hits else None,
+        "last_ts": int(hits[-1].get("ts", 0)) if hits else None,
+    }
+
+
+def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_path: Path) -> FastAPI:
     app = FastAPI()
 
+    static_dir = Path(__file__).resolve().parent / "static"
+    if static_dir.exists():
+        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
     @app.get("/", response_class=HTMLResponse)
-    def index() -> str:
-        body = f"""
+    def index(req: Request, scenario: str = "", view: str = "") -> str:
+        view = (view or "").strip().lower()
+        scenario = (scenario or "").strip().lower()
+        if scenario not in {"", "immediate", "two_phase"}:
+            scenario = ""
+
+        if not view and scenario:
+            view = "advanced"
+
+        if view not in {"", "advanced"}:
+            view = ""
+
+        if not view:
+            chooser = f"""
 <h1>Mail Client Self-Test</h1>
-<p class=\"muted\">Host: <code>{hostname}</code></p>
-<div class=\"row\">{_mode_buttons()}</div>
-<p class=\"muted\">This service generates a <b>session code</b>. Use the shown <b>username</b> in your mail client so results can be matched even behind NAT/shared IPs.</p>
-<p class=\"muted\"><b>Important:</b> selecting a testcase currently sets the mode for your <b>public IP address</b>. If you share an IP (same Wi-Fi / university / company network), another user can overwrite the selected testcase for that IP.</p>
+<p class=\"muted\">WebUI host: <code>{hostname}</code></p>
+<p class=\"muted\">Autodetect domain: <code>{autodetect_domain}</code></p>
+
+<div class=\"glass-panel\" style=\"margin-top: 14px;\">\
+  <h2>Choose view</h2>\
+  <div class=\"row muted\">Guided runs the full suite automatically. Advanced lets you select scenario and testcase manually.</div>\
+  <div class=\"grid-2\" style=\"margin-top: 12px;\">\
+    <div class=\"mode-card\">\
+      <a class=\"btn mode-start\" href=\"/guided\">Guided</a>\
+    </div>\
+    <div class=\"mode-card\">\
+      <a class=\"btn mode-start\" href=\"/?view=advanced\">Advanced</a>\
+    </div>\
+  </div>\
+</div>
 """
+            return _html_page("Self-Test", chooser)
+
+        scenario_choice = ""
+        if not scenario:
+            scenario_choice = f"""
+<h1>Mail Client Self-Test</h1>
+<p class=\"muted\">WebUI host: <code>{hostname}</code></p>
+<p class=\"muted\">Autodetect domain: <code>{autodetect_domain}</code></p>
+
+<div class=\"glass-panel\" style=\"margin-top: 14px;\">
+  <h2>Choose scenario</h2>
+  <div class=\"row muted\">Select how the testcase should be applied: immediately during setup/autodetect, or only after the first successful login.</div>
+  <div class=\"grid-2\" style=\"margin-top: 12px;\">
+    <div class=\"mode-card\">
+      <a class=\"btn mode-start\" href=\"/?scenario=immediate\">Immediate</a>
+      <button class=\"mode-info scenario-info\" type=\"button\" data-scenario=\"immediate\" aria-label=\"Info\">i</button>
+    </div>
+    <div class=\"mode-card\">
+      <a class=\"btn mode-start\" href=\"/?scenario=two_phase\">Two-phase</a>
+      <button class=\"mode-info scenario-info\" type=\"button\" data-scenario=\"two_phase\" aria-label=\"Info\">i</button>
+    </div>
+  </div>
+  <div class=\"row muted\" style=\"margin-top: 10px;\">You will select the testcase mode on the next step.</div>
+</div>
+"""
+
+        body = """
+__SCENARIO_CHOICE__
+__MODE_SELECTION__
+<p class="muted">This service generates a <b>session code</b>. Use the shown <b>username</b> in your mail client so results can be matched even behind NAT/shared IPs.</p>
+<p class="muted"><b>Important:</b> selecting a testcase currently sets the mode for your <b>public IP address</b>. If you share an IP (same Wi-Fi / university / company network), another user can overwrite the selected testcase for that IP.</p>
+
+<div id="mode-modal" class="modal-backdrop" style="display:none">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title" id="mode-modal-title">Info</div>
+      <button class="modal-close" id="mode-modal-close" type="button" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body" id="mode-modal-body"></div>
+  </div>
+</div>
+
+<script>
+  const SCENARIO_INFO = {
+    immediate: {
+      title: 'Immediate scenario',
+      html: `<div class="row"><b>Attack scenario:</b> an active attacker (MITM) is already present during account setup / autodetect, so the testcase affects what the client decides and stores as its security settings.</div><div class="row">The selected testcase is active immediately, including during autodetect / account setup.</div><div class="row muted"><b>Implication:</b> this is the stricter / more pessimistic scenario. If the client downgrades to insecure settings (e.g., chooses "No encryption" in T1) or sends credentials without TLS, the client is vulnerable to downgrade attacks during setup and may permanently store unsafe configuration. If the client still enforces TLS despite disruptions, it is more robust.</div>`
+    },
+    two_phase: {
+      title: 'Two-phase scenario',
+      html: `<div class="row"><b>Attack scenario:</b> initial setup happens without interference (you can complete a normal, secure login once). Only afterwards, an active attacker appears and tries to force downgrade / break STARTTLS on later connections.</div><div class="row">Setup behaves like BASELINE until your first successful login/auth for this session.</div><div class="row muted"><b>Implication:</b> this isolates the client's behavior after it already had a secure baseline. A secure client should refuse to send credentials without TLS even if STARTTLS is stripped/refused/broken later. If the client falls back to plaintext auth after the attacker appears, it is vulnerable to post-setup downgrade attacks (credentials exposure on subsequent reconnects/sends).</div>`
+    }
+  };
+
+  const MODE_INFO = {
+    baseline: {
+      title: 'BASELINE',
+      html: '<div class="row">Normal server behavior: STARTTLS is offered (where applicable) and AUTH/LOGIN is accepted.</div>'
+    },
+    t1: {
+      title: 'T1 – STARTTLS not advertised',
+      img: '/static/T1.png',
+      html: '<div class="row">Simulation: the server does not advertise STARTTLS (capability stripping equivalent).</div>'
+    },
+    t2: {
+      title: 'T2 – TLS negotiation disrupted',
+      img: '/static/T2.png',
+      html: '<div class="row">Simulation: the server accepts STARTTLS and then breaks the TLS negotiation (handshake failure-like).</div>'
+    },
+    t3: {
+      title: 'T3 – STARTTLS refused',
+      img: '/static/T3.png',
+      html: '<div class="row">Simulation: STARTTLS is advertised but rejected when requested.</div>'
+    },
+    t4: {
+      title: 'T4 – Post-handshake disruption',
+      img: '/static/T4.png',
+      html: '<div class="row">Simulation: TLS handshake succeeds, then the server injects unexpected data (e.g., NOOP) and closes.</div>'
+    }
+  };
+
+  const modal = document.getElementById('mode-modal');
+  const modalTitle = document.getElementById('mode-modal-title');
+  const modalBody = document.getElementById('mode-modal-body');
+  const modalClose = document.getElementById('mode-modal-close');
+
+  function openModeInfo(mode) {
+    const info = MODE_INFO[mode];
+    if (!info) return;
+    if (modal.parentElement !== document.body) {
+      document.body.appendChild(modal);
+    }
+    modalTitle.textContent = info.title || mode;
+    let body = info.html || '';
+    if (info.img) {
+      body = `<div class="modal-figure"><img class="mode-figure" src="${info.img}" alt="${info.title}" /></div>` + body;
+    }
+    modalBody.innerHTML = body;
+    modal.style.display = 'flex';
+  }
+
+  function openScenarioInfo(scenario) {
+    const info = SCENARIO_INFO[scenario];
+    if (!info) return;
+    if (modal.parentElement !== document.body) {
+      document.body.appendChild(modal);
+    }
+    modalTitle.textContent = info.title || scenario;
+    modalBody.innerHTML = info.html || '';
+    modal.style.display = 'flex';
+  }
+
+  function closeModeInfo() {
+    modal.style.display = 'none';
+  }
+
+  document.querySelectorAll('.mode-info').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openModeInfo(btn.getAttribute('data-mode'));
+    });
+  });
+
+  document.querySelectorAll('.scenario-info').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openScenarioInfo(btn.getAttribute('data-scenario'));
+    });
+  });
+  modalClose.addEventListener('click', closeModeInfo);
+  modal.addEventListener('click', (ev) => {
+    if (ev.target === modal) closeModeInfo();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') closeModeInfo();
+  });
+</script>
+"""
+
+        mode_selection = ""
+        if scenario:
+            mode_selection = f"""\
+<div class=\"page-header\">\
+  <h1>Mail Client Self-Test</h1>\
+  <div class=\"page-actions\">\
+    <span class=\"pill\">{scenario}</span>\
+    <a class=\"icon-btn\" href=\"/\" aria-label=\"Back\" title=\"Back\">←</a>\
+  </div>\
+</div>\
+<p class=\"muted\">WebUI host: <code>{hostname}</code></p>
+<p class=\"muted\">Autodetect domain: <code>{autodetect_domain}</code></p>
+<div class=\"row\">__MODE_BUTTONS__</div>
+"""
+
+        body = (
+            body.replace("__SCENARIO_CHOICE__", scenario_choice)
+            .replace("__MODE_SELECTION__", mode_selection)
+            .replace("__MODE_BUTTONS__", _mode_buttons_for_scenario(scenario) if scenario else "")
+        )
         return _html_page("Self-Test", body)
 
+    @app.get("/favicon.ico")
+    def favicon() -> Response:
+        return Response(status_code=int(HTTPStatus.NO_CONTENT))
+
+    @app.get("/guided", response_class=HTMLResponse)
+    def guided() -> str:
+        body = """
+<div class="page-header">
+  <h1>Guided Self-Test</h1>
+  <div class="page-actions">
+    <a class="icon-btn" href="/" aria-label="Back" title="Back">←</a>
+  </div>
+</div>
+
+<div class="glass-panel">
+  <div class="row" style="display:flex; justify-content: space-between; gap: 12px; align-items: center;"><b>Progress</b><span class="muted" id="guided-progress-pct">0%</span></div>
+  <div class="progress-wrap"><div id="guided-progress" class="progress-fill" style="width:0%"></div></div>
+  <div class="row muted" id="guided-progress-reason">Last progress: (none yet)</div>
+</div>
+
+<div class="glass-panel" style="margin-top: 12px;" id="guided-step-panel">
+  <div class="row" id="guided-step-title"><b>Loading…</b></div>
+  <div class="row muted" id="guided-step-instructions"></div>
+  <div id="guided-credentials" style="margin-top: 10px;"></div>
+  <div id="guided-manual" style="margin-top: 10px; display:none;"></div>
+  <div class="row" style="margin-top: 12px; display:flex; gap:10px; flex-wrap:wrap;" id="guided-controls">
+    <a class="btn btn-cta btn-success" id="guided-confirm" href="#">I did the steps</a>
+    <a class="btn" id="guided-skip" href="#">Skip anyway</a>
+    <a class="btn btn-danger" id="guided-abort" href="#">Abort</a>
+  </div>
+  <div class="row muted" id="guided-errors" style="margin-top: 10px;"></div>
+</div>
+
+<div class="glass-panel" style="margin-top: 12px; display:none;" id="guided-results"></div>
+
+<script>
+  let runId = null;
+  let pollTimer = null;
+  let lastRender = {
+    status: null,
+    step_index: null,
+    step_label: null,
+    last_progress_reason: null,
+    instructions_html: null,
+    credentials_html: null,
+    show_manual: null,
+    manual_html: null,
+    results_html: null,
+    ready: null,
+    error: null,
+    progress_pct: null,
+  };
+
+  function pct(x) {
+    return Math.max(0, Math.min(100, Math.round((x || 0) * 10000) / 100));
+  }
+
+  async function api(path, method='GET') {
+    const r = await fetch(path, {method});
+    return await r.json();
+  }
+
+  function setDisabled(el, disabled) {
+    if (!el) return;
+    if (disabled) el.classList.add('btn-disabled');
+    else el.classList.remove('btn-disabled');
+  }
+
+  function setTextIfChanged(el, next) {
+    if (!el) return;
+    const cur = el.textContent || '';
+    if (cur !== (next || '')) el.textContent = next || '';
+  }
+
+  function setHtmlIfChanged(el, next) {
+    if (!el) return;
+    const cur = el.innerHTML || '';
+    if (cur !== (next || '')) el.innerHTML = next || '';
+  }
+
+  function render(st) {
+    const prog = document.getElementById('guided-progress');
+    const progPct = document.getElementById('guided-progress-pct');
+    const reason = document.getElementById('guided-progress-reason');
+    const stepPanel = document.getElementById('guided-step-panel');
+    const title = document.getElementById('guided-step-title');
+    const instr = document.getElementById('guided-step-instructions');
+    const creds = document.getElementById('guided-credentials');
+    const manual = document.getElementById('guided-manual');
+    const confirmBtn = document.getElementById('guided-confirm');
+    const skipBtn = document.getElementById('guided-skip');
+    const abortBtn = document.getElementById('guided-abort');
+    const errs = document.getElementById('guided-errors');
+    const results = document.getElementById('guided-results');
+
+    const p = `${pct(st.progress)}%`;
+    if (lastRender.progress_pct !== p) {
+      lastRender.progress_pct = p;
+      prog.style.width = p;
+      setTextIfChanged(progPct, p);
+    }
+
+    if (lastRender.last_progress_reason !== (st.last_progress_reason || null)) {
+      lastRender.last_progress_reason = st.last_progress_reason || null;
+      setTextIfChanged(reason, `Last progress: ${st.last_progress_reason || '(none yet)'}`);
+    }
+
+    if (lastRender.error !== (st.error || null)) {
+      lastRender.error = st.error || null;
+      setTextIfChanged(errs, st.error || '');
+    }
+
+    if (st.status === 'completed' || st.status === 'aborted') {
+      if (stepPanel) stepPanel.style.display = 'none';
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      if (st.results_html && lastRender.results_html !== st.results_html) {
+        lastRender.results_html = st.results_html;
+        results.style.display = 'block';
+        setHtmlIfChanged(results, st.results_html);
+      } else if (st.results_html) {
+        results.style.display = 'block';
+      }
+      return;
+    }
+
+    if (stepPanel) stepPanel.style.display = 'block';
+
+    const nextTitle = `<b>Step ${st.step_index + 1}/9:</b> ${st.step_label || ''}`;
+    if (lastRender.step_index !== st.step_index || lastRender.step_label !== (st.step_label || null)) {
+      lastRender.step_index = st.step_index;
+      lastRender.step_label = st.step_label || null;
+      setHtmlIfChanged(title, nextTitle);
+    }
+
+    if (lastRender.instructions_html !== (st.instructions_html || '')) {
+      lastRender.instructions_html = st.instructions_html || '';
+      setHtmlIfChanged(instr, st.instructions_html || '');
+    }
+
+    if (lastRender.credentials_html !== (st.credentials_html || '')) {
+      lastRender.credentials_html = st.credentials_html || '';
+      setHtmlIfChanged(creds, st.credentials_html || '');
+    }
+
+    if (st.show_manual) {
+      manual.style.display = 'block';
+      if (lastRender.manual_html !== (st.manual_html || '')) {
+        lastRender.manual_html = st.manual_html || '';
+        setHtmlIfChanged(manual, st.manual_html || '');
+      }
+    } else {
+      manual.style.display = 'none';
+      lastRender.manual_html = null;
+    }
+
+    if (lastRender.ready !== !!st.ready) {
+      lastRender.ready = !!st.ready;
+      setDisabled(confirmBtn, !st.ready);
+    }
+  }
+
+  async function poll() {
+    if (!runId) return;
+    const st = await api(`/api/guided/run/${encodeURIComponent(runId)}`);
+    if (!st.ok) {
+      document.getElementById('guided-errors').textContent = st.error || 'poll failed';
+      return;
+    }
+    render(st);
+  }
+
+  async function start() {
+    const r = await api('/api/guided/run/start', 'POST');
+    if (!r.ok) {
+      document.getElementById('guided-errors').textContent = r.error || 'start failed';
+      return;
+    }
+    runId = r.run_id;
+    await poll();
+    pollTimer = setInterval(poll, 1200);
+  }
+
+  document.getElementById('guided-confirm').addEventListener('click', async (ev) => {
+    ev.preventDefault();
+    if (!runId) return;
+    if (ev.target.classList.contains('btn-disabled')) return;
+    const r = await api(`/api/guided/run/${encodeURIComponent(runId)}/confirm`, 'POST');
+    if (!r.ok) document.getElementById('guided-errors').textContent = r.error || 'confirm failed';
+    await poll();
+  });
+
+  document.getElementById('guided-skip').addEventListener('click', async (ev) => {
+    ev.preventDefault();
+    if (!runId) return;
+    if (!confirm('Skip this step anyway?')) return;
+    const r = await api(`/api/guided/run/${encodeURIComponent(runId)}/skip`, 'POST');
+    if (!r.ok) document.getElementById('guided-errors').textContent = r.error || 'skip failed';
+    await poll();
+  });
+
+  document.getElementById('guided-abort').addEventListener('click', async (ev) => {
+    ev.preventDefault();
+    if (!runId) return;
+    if (!confirm('Abort the guided run?')) return;
+    const r = await api(`/api/guided/run/${encodeURIComponent(runId)}/abort`, 'POST');
+    if (!r.ok) document.getElementById('guided-errors').textContent = r.error || 'abort failed';
+    await poll();
+  });
+
+  // Copy-to-clipboard for inline copy buttons
+  document.addEventListener('click', async (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('.copy-btn') : null;
+    if (!btn) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const s = btn.getAttribute('data-copy') || '';
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(s);
+        return;
+      }
+    } catch (e) {}
+    const ta = document.createElement('textarea');
+    ta.value = s;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.top = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    ta.remove();
+  });
+
+  start();
+</script>
+"""
+        return _html_page("Guided", body)
+
     @app.get("/start", response_class=HTMLResponse)
-    def start(req: Request, mode: str = "baseline", ttl: int = 900) -> str:
+    def start(req: Request, mode: str = "baseline", ttl: int = 900, scenario: str = "immediate") -> str:
         if mode not in {"baseline", "t1", "t2", "t3", "t4"}:
             return _html_page("Bad Request", "<h1>Invalid mode</h1>")
         if ttl < 60 or ttl > 3600:
             return _html_page("Bad Request", "<h1>Invalid ttl</h1><p>Use 60..3600 seconds.</p>")
 
+        scenario = (scenario or "").strip().lower()
+        if scenario not in {"immediate", "two_phase"}:
+            return _html_page("Bad Request", "<h1>Invalid scenario</h1>")
+
         ip = _client_ip(req)
         session = _new_session_code()
         username = f"test-{session}"
-        email_addr = f"{username}@{hostname}"
+        email_addr = f"{username}@{autodetect_domain}"
+        imap_host = f"imap.{autodetect_domain}"
+        smtp_host = f"smtp.{autodetect_domain}"
 
         data = _load_store(store_path)
         _prune_overrides(data)
         now = int(time.time())
         expires = now + ttl
         overrides = [o for o in data.get("overrides", []) if o.get("ip") != ip]
-        overrides.append({"ip": ip, "mode": mode, "expires": expires})
+        overrides.append({"ip": ip, "mode": mode, "expires": expires, "session": session, "scenario": scenario})
         data["overrides"] = overrides
         _save_store(store_path, data)
 
         body = f"""
-<h1>Session started</h1>
+<div class="page-header">
+  <h1>Session started</h1>
+  <div class="page-actions">
+    <a class="icon-btn" href="/" aria-label="Back" title="Back">←</a>
+  </div>
+</div>
 <div class="glass-panel">
   <div class="kv">
     <div><b>Mode</b>: <span class="pill">{mode.upper()}</span></div>
+    <div><b>Scenario</b>: <span class="pill">{scenario}</span></div>
     <div><b>Time remaining</b>: <code><span id="ttl-remaining">...</span></code> <a class="btn" id="ttl-extend" href="#">Extend +15m</a></div>
   </div>
   <div class="row"><b>Your public IP</b>: <code>{ip}</code></div>
@@ -507,8 +931,8 @@ def create_app(hostname: str, store_path: Path, events_path: Path) -> FastAPI:
 <div class="grid-2" style="margin-top: 14px;">
   <div class="glass-panel">
     <h2>Credentials</h2>
-    <div class="row"><b>Email address</b> (autodetect): <code>{email_addr}</code></div>
-    <div class="row"><b>Username</b>: <code>{username}</code></div>
+    <div class="row"><b>Email address</b> (autodetect): <code>{email_addr}</code> {_copy_button(email_addr, 'Copy email')}</div>
+    <div class="row"><b>Username</b>: <code>{username}</code> {_copy_button(username, 'Copy username')}</div>
     <div class="row"><b>Password</b>: <code>test</code> <span class="muted">(any value; not stored)</span></div>
   </div>
 
@@ -516,10 +940,9 @@ def create_app(hostname: str, store_path: Path, events_path: Path) -> FastAPI:
     <h2>Setup method</h2>
     <div class="row"><label for="setup"><b>Select</b>:</label></div>
     <div class="row"><select id="setup" style="padding: 10px 12px; border-radius: 14px; width: 100%;">
-      <option value="manual" selected>Manual configuration (paper-compatible)</option>
-      <option value="srv">Autodetect without XML (DNS SRV)</option>
+      <option value="manual" selected>Manual configuration (recommended)</option>
+      <option value="autodetect">Autodetect (enter email address)</option>
     </select></div>
-    <div class="row muted">Tip: if SRV autodetect doesn't work in your client, use Manual.</div>
   </div>
 </div>
 
@@ -537,14 +960,9 @@ def create_app(hostname: str, store_path: Path, events_path: Path) -> FastAPI:
     <div class="row"><b>Optional</b>: <b>SMTP</b> host <code>{hostname}</code>, port <code>25</code>, security <b>STARTTLS</b> <span class="muted">(some clients don't use this)</span></div>
   </div>
 
-  <div id="setup-srv" style="display:none">
-    <div class="row">Use <b>autodetect</b> by entering the email address <code>{email_addr}</code> in your client.</div>
-    <div class="row muted">This relies on DNS SRV records (no XML). Client support varies.</div>
-    <pre>_imaps._tcp.{hostname}  PRI 0  WEIGHT 1  PORT 993  TARGET {hostname}.
-_imap._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 143  TARGET {hostname}.
-_submissions._tcp.{hostname} PRI 0 WEIGHT 1 PORT 465 TARGET {hostname}.
-_submission._tcp.{hostname}  PRI 0 WEIGHT 1 PORT 587 TARGET {hostname}.
-_smtp._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 25   TARGET {hostname}.</pre>
+  <div id="setup-autodetect" style="display:none">
+    <div class="row">Enter this email address in your client: <code>{email_addr}</code> {_copy_button(email_addr, 'Copy email')}</div>
+    <div class="row muted">The client should discover <code>{imap_host}</code> / <code>{smtp_host}</code>. If it proposes different providers/settings, switch to <b>Manual configuration</b> and use the settings above.</div>
   </div>
 </div>
 
@@ -583,36 +1001,43 @@ _smtp._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 25   TARGET {hostname}.</pre>
 
   const sel = document.getElementById('setup');
   const manual = document.getElementById('setup-manual');
-  const srv = document.getElementById('setup-srv');
+  const autodetect = document.getElementById('setup-autodetect');
   function apply() {{
     const v = sel.value;
     manual.style.display = (v === 'manual') ? 'block' : 'none';
-    srv.style.display = (v === 'srv') ? 'block' : 'none';
+    autodetect.style.display = (v === 'autodetect') ? 'block' : 'none';
   }}
   sel.addEventListener('change', apply);
   apply();
+
 </script>
 
+<script src="/static/toasts.js"></script>
+<script>initToasts({json.dumps(session)});</script>
+
 <div class="glass-panel" style="margin-top: 14px;">
-  <div class="row muted">After you try to login/send mail, come back and refresh the status page.</div>
-  <div class="row"><a class="btn" href="/status?session={session}">Open status page</a> <a class="btn" href="/">Back</a></div>
+  <div class="row muted">Open the status page now, then configure your mail client and try to login/send mail.</div>
+  <div class="row"><a class="btn btn-cta" href="/status?session={session}">Open status page</a></div>
 </div>
 """
-        return _html_page("Session", body)
+        return _html_page("Session", body + _copy_script())
 
     @app.get("/status", response_class=HTMLResponse)
     def status(session: str) -> str:
         events = _read_events(events_path)
-        hits = [e for e in events if e.get("session") == session]
-        hits = sorted(hits, key=lambda e: int(e.get("ts", 0)))
+        summary = _summarize_session(events, session)
+        hits = summary["events"]
         last = hits[-1] if hits else None
 
         def _row(label: str, value: str) -> str:
             return f"<tr><th>{label}</th><td>{value}</td></tr>"
 
         rows = []
-        rows.append(_row("Session", f"<code>{session}</code>"))
-        rows.append(_row("Username", f"<code>test-{session}</code>"))
+        username = f"test-{session}"
+        email_addr = f"{username}@{autodetect_domain}"
+        rows.append(_row("Session", f"<code>{session}</code> {_copy_button(session, 'Copy session')}"))
+        rows.append(_row("Username", f"<code>{username}</code> {_copy_button(username, 'Copy username')}"))
+        rows.append(_row("Email", f"<code>{email_addr}</code> {_copy_button(email_addr, 'Copy email')}"))
         rows.append(_row("Events observed", str(len(hits))))
         if last:
             rows.append(_row("Last event", f"<code>{last.get('event')}</code> ({last.get('proto')})"))
@@ -622,22 +1047,89 @@ _smtp._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 25   TARGET {hostname}.</pre>
         else:
             rows.append(_row("Last event", "(none yet)"))
 
-        # Simple risk indicator: any auth/login with tls=false for this session
-        saw_plain = any((e.get("event") in {"auth_command", "auth_login", "login_command"}) and (e.get("tls") is False) for e in hits)
-        risk = "YES (plaintext auth observed)" if saw_plain else "NO (no plaintext auth observed yet)"
+        verdict = str(summary.get("verdict"))
+        if verdict == "FAIL":
+            headline = "FAIL (plaintext credentials exposure observed)"
+            verdict_class = "pill pill-fail"
+        elif verdict == "PASS":
+            headline = "PASS (no plaintext credentials observed; TLS auth seen)"
+            verdict_class = "pill pill-pass"
+        else:
+            headline = "INCONCLUSIVE (no credentials observed yet)"
+            verdict_class = "pill"
+
+        smtp = summary.get("smtp", {})
+        imap = summary.get("imap", {})
+        retry_like = bool(summary.get("retry_like"))
+        starttls_refused_like = int(summary.get("starttls_refused_like") or 0)
+
+        details = []
+        details.append(f"<div class=\"row\"><b>Verdict</b>: <span class=\"{verdict_class}\">{headline}</span></div>")
+        details.append(
+            "<div class=\"row muted\"><b>FAIL</b> only triggers when the service observes an auth/login attempt with <code>tls=false</code>." "</div>"
+        )
+        if verdict == "INCONCLUSIVE":
+            details.append(
+                "<div class=\"row muted\">No auth/login attempt was observed. This often means the client aborted earlier (e.g., due to TLS errors) or got stuck retrying.</div>"
+            )
+        if retry_like:
+            details.append(
+                "<div class=\"row muted\"><b>Retry loop hint:</b> multiple reconnects were observed without reaching authentication. This can happen if the client keeps trying different settings.</div>"
+            )
+        if starttls_refused_like > 0:
+            details.append(
+                "<div class=\"row muted\"><b>STARTTLS disruption observed:</b> the client attempted STARTTLS and the server refused/dropped it (testcase behavior). Some clients may respond by suggesting insecure changes.</div>"
+            )
+
+        if verdict in {"INCONCLUSIVE", "PASS"}:
+            details.append(
+                "<div class=\"glass-panel\" style=\"margin-top: 12px;\">"
+                "<h2>If you saw no clear result, check your client UI</h2>"
+                "<div class=\"row muted\">If your client shows prompts like these, that is a <b>security-relevant downgrade signal</b> even if we did not observe plaintext credentials on the wire:</div>"
+                "<div class=\"row\">- Suggesting to <b>disable STARTTLS</b> / use <b>no encryption</b></div>"
+                "<div class=\"row\">- Suggesting to change security from <b>STARTTLS</b> to <b>None</b></div>"
+                "<div class=\"row\">- Suggesting to accept an <b>insecure connection</b> to proceed</div>"
+                "<div class=\"row muted\">If you see such prompts, please do <b>not</b> follow them. Take a screenshot and report it as a downgrade indication.</div>"
+                "</div>"
+            )
 
         table = "<table>" + "".join(rows) + "</table>"
+        proto_table = (
+            "<table>"
+            + "".join(
+                [
+                    "<tr><th>Protocol</th><th>Ports</th><th>Connects</th><th>Disconnects</th><th>STARTTLS</th><th>Auth (TLS)</th><th>Auth (plain)</th></tr>",
+                    f"<tr><td>IMAP</td><td><code>{imap.get('ports')}</code></td><td>{imap.get('connects')}</td><td>{imap.get('disconnects')}</td><td>{imap.get('starttls')} <span class=\"muted\">{json.dumps(imap.get('starttls_results', {}))}</span></td><td>{imap.get('auth_tls')}</td><td>{imap.get('auth_plain')}</td></tr>",
+                    f"<tr><td>SMTP</td><td><code>{smtp.get('ports')}</code></td><td>{smtp.get('connects')}</td><td>{smtp.get('disconnects')}</td><td>{smtp.get('starttls')} <span class=\"muted\">{json.dumps(smtp.get('starttls_results', {}))}</span></td><td>{smtp.get('auth_tls')}</td><td>{smtp.get('auth_plain')}</td></tr>",
+                ]
+            )
+            + "</table>"
+        )
+
         body = f"""
-<h1>Status</h1>
-<p><b>Plaintext authentication observed:</b> {risk}</p>
-{table}
+<div class="page-header">
+  <h1>Status</h1>
+  <div class="page-actions">
+    <a class="icon-btn" href="/status?session={session}" aria-label="Reload" title="Reload">↻</a>
+    <a class="icon-btn" href="/" aria-label="Back" title="Back">←</a>
+  </div>
+</div>
+
+<div class="glass-panel">{''.join(details)}</div>
+<div style="margin-top: 12px;">{table}</div>
+
+<h2>Protocol summary</h2>
+{proto_table}
 
 <h2>Recent events</h2>
-<pre>{json.dumps(hits[-20:], indent=2)}</pre>
+<div class="glass-panel" style="max-height: 420px; overflow-y: auto; overflow-x: auto;">
+  <pre style="margin: 0;">{json.dumps(hits[-40:], indent=2)}</pre>
+</div>
 
-<div class=\"row\"><a class=\"btn\" href=\"/status?session={session}\">Refresh</a> <a class=\"btn\" href=\"/\">Back</a></div>
+<script src="/static/toasts.js"></script>
+<script>initToasts({json.dumps(session)});</script>
 """
-        return _html_page("Status", body)
+        return _html_page("Status", body + _copy_script())
 
     @app.get("/api/health")
     def api_health() -> dict[str, Any]:
@@ -657,9 +1149,17 @@ _smtp._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 25   TARGET {hostname}.</pre>
 
         overrides: list[dict[str, Any]] = []
         cur_expires: Optional[int] = None
+        cur_session: Optional[str] = None
+        cur_scenario: Optional[str] = None
+        cur_activated: Optional[bool] = None
         for o in data.get("overrides", []):
             if o.get("ip") == ip:
                 cur_expires = int(o.get("expires", 0))
+                s = o.get("session")
+                cur_session = str(s) if s is not None else None
+                cur_scenario = str(o.get("scenario") or "") or None
+                if "activated" in o:
+                    cur_activated = bool(o.get("activated"))
                 continue
             overrides.append(o)
 
@@ -669,7 +1169,12 @@ _smtp._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 25   TARGET {hostname}.</pre>
         if new_expires > hard_cap:
             new_expires = hard_cap
 
-        overrides.append({"ip": ip, "mode": mode, "expires": new_expires})
+        entry: dict[str, Any] = {"ip": ip, "mode": mode, "expires": new_expires, "session": (cur_session or session)}
+        if cur_scenario is not None:
+            entry["scenario"] = cur_scenario
+        if cur_activated is not None:
+            entry["activated"] = cur_activated
+        overrides.append(entry)
         data["overrides"] = overrides
         _save_store(store_path, data)
 
@@ -678,9 +1183,300 @@ _smtp._tcp.{hostname}   PRI 0  WEIGHT 1  PORT 25   TARGET {hostname}.</pre>
     @app.get("/api/session/{session}")
     def api_session(session: str) -> JSONResponse:
         events = _read_events(events_path)
-        hits = [e for e in events if e.get("session") == session]
-        hits = sorted(hits, key=lambda e: int(e.get("ts", 0)))
-        return JSONResponse({"ok": True, "session": session, "events": hits[-200:]})
+        summary = _summarize_session(events, session)
+        return JSONResponse({"ok": True, "session": session, "verdict": summary.get("verdict"), "summary": {"smtp": summary.get("smtp"), "imap": summary.get("imap"), "retry_like": summary.get("retry_like"), "starttls_refused_like": summary.get("starttls_refused_like"), "saw_plain": summary.get("saw_plain"), "saw_tls_auth": summary.get("saw_tls_auth")}, "events": summary.get("events", [])[-200:]})
+
+    def _guided_get_run(data: dict[str, Any], run_id: str) -> Optional[dict[str, Any]]:
+        data.setdefault("guided_runs", {})
+        run = data["guided_runs"].get(run_id)
+        if not isinstance(run, dict):
+            return None
+        return run
+
+    def _guided_current_step(run: dict[str, Any]) -> Optional[dict[str, Any]]:
+        idx = int(run.get("step_index") or 0)
+        steps = list(run.get("steps") or [])
+        if idx < 0 or idx >= len(steps):
+            return None
+        step = steps[idx]
+        if not isinstance(step, dict):
+            return None
+        return step
+
+    def _guided_step_credentials_html(session: str) -> str:
+        username = f"test-{session}"
+        email_addr = f"{username}@{autodetect_domain}"
+        return (
+            "<div class=\"glass-panel\">"
+            "<h2>Credentials</h2>"
+            + f"<div class=\"row\"><b>Email</b> (autodetect): <code>{_esc_html(email_addr)}</code> {_copy_button(email_addr, 'Copy email')}</div>"
+            + f"<div class=\"row\"><b>Username</b>: <code>{_esc_html(username)}</code> {_copy_button(username, 'Copy username')}</div>"
+            + "<div class=\"row\"><b>Password</b>: <code>test</code></div>"
+            "</div>"
+        )
+
+    def _guided_manual_html() -> str:
+        return (
+            "<div class=\"glass-panel\">"
+            "<h2>Manual settings</h2>"
+            + f"<div class=\"row\"><b>IMAP</b>: host <code>{_esc_html(hostname)}</code>, port <code>143</code>, security <b>STARTTLS</b></div>"
+            + f"<div class=\"row\"><b>SMTP</b>: host <code>{_esc_html(hostname)}</code>, port <code>587</code>, security <b>STARTTLS</b></div>"
+            + "<div class=\"row muted\">SMTP is required: please attempt to send a test mail in every step.</div>"
+            "</div>"
+        )
+
+    def _guided_instructions_html(step: dict[str, Any]) -> str:
+        scenario = str(step.get("scenario") or "")
+        mode = str(step.get("mode") or "")
+        base = "<div class=\"row\">1) Add this account via autodetect (enter the email above).</div>"
+        base += "<div class=\"row\">2) Try to login / refresh inbox.</div>"
+        base += "<div class=\"row\">3) Try to send a test mail (SMTP attempt is required).</div>"
+        if scenario == "two_phase":
+            base += "<div class=\"row muted\">Two-phase: first login should succeed; then trigger another refresh/send so the disruption happens after activation.</div>"
+        if mode == "baseline":
+            base += "<div class=\"row muted\">Baseline sanity check: should normally login over STARTTLS and not expose plaintext credentials.</div>"
+        else:
+            base += "<div class=\"row muted\">Do not accept insecure downgrade prompts (e.g., \"No encryption\").</div>"
+        return base
+
+    @app.post("/api/guided/run/start")
+    def api_guided_start(req: Request) -> JSONResponse:
+        ip = _client_ip(req)
+        run_id = _guided_new_run_id()
+        steps = _guided_steps()
+
+        data = _load_store(store_path)
+        _prune_overrides(data)
+        data.setdefault("guided_runs", {})
+
+        step0 = dict(steps[0])
+        session0 = _new_session_code()
+        step0["session"] = session0
+        step0["created_ts"] = int(time.time())
+        step0["milestones"] = {}
+        step0["step_progress"] = 0.0
+        step0["last_progress_reason"] = None
+
+        expires0 = _guided_set_override(data, ip, str(step0["mode"]), str(step0["scenario"]), session0, ttl=900)
+        step0["expires"] = expires0
+
+        run = {
+            "run_id": run_id,
+            "ip": ip,
+            "created_ts": int(time.time()),
+            "status": "running",
+            "step_index": 0,
+            "steps": [step0] + [dict(s) for s in steps[1:]],
+            "last_progress_reason": None,
+            "last_progress": 0.0,
+        }
+        data["guided_runs"][run_id] = run
+        _save_store(store_path, data)
+        return JSONResponse({"ok": True, "run_id": run_id})
+
+    def _guided_finish_step(step: dict[str, Any], summary: dict[str, Any], forced_verdict: Optional[str] = None) -> None:
+        verdict = str(forced_verdict or summary.get("verdict") or "INCONCLUSIVE")
+        step["result"] = {
+            "verdict": verdict,
+            "findings": _guided_findings(summary),
+            "detail": {
+                "smtp": summary.get("smtp"),
+                "imap": summary.get("imap"),
+                "retry_like": summary.get("retry_like"),
+                "starttls_refused_like": summary.get("starttls_refused_like"),
+            },
+        }
+        step["finished_ts"] = int(time.time())
+
+    def _guided_advance_run(data: dict[str, Any], run: dict[str, Any]) -> None:
+        ip = str(run.get("ip") or "")
+        steps = list(run.get("steps") or [])
+        idx = int(run.get("step_index") or 0)
+        idx += 1
+        run["step_index"] = idx
+        if idx >= len(steps):
+            run["status"] = "completed"
+            run["last_progress"] = 1.0
+            run["last_progress_reason"] = "Completed"
+            data["overrides"] = [o for o in data.get("overrides", []) if o.get("ip") != ip]
+            return
+
+        step = steps[idx]
+        if not isinstance(step, dict):
+            step = {}
+            steps[idx] = step
+        session = _new_session_code()
+        step["session"] = session
+        step["created_ts"] = int(time.time())
+        step["milestones"] = {}
+        step["step_progress"] = 0.0
+        step["last_progress_reason"] = None
+
+        expires = _guided_set_override(data, ip, str(step.get("mode") or "baseline"), str(step.get("scenario") or "immediate"), session, ttl=900)
+        step["expires"] = expires
+        run["steps"] = steps
+
+    def _guided_state_response(data: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
+        status = str(run.get("status") or "running")
+        if status in {"completed", "aborted"}:
+            return {
+                "ok": True,
+                "status": status,
+                "progress": float(run.get("last_progress") or 0.0),
+                "last_progress_reason": run.get("last_progress_reason"),
+                "step_index": int(run.get("step_index") or 0),
+                "results_html": _guided_results_html(run),
+            }
+
+        step = _guided_current_step(run)
+        if step is None:
+            return {"ok": False, "error": "invalid step"}
+        session = str(step.get("session") or "")
+        if not session:
+            return {"ok": False, "error": "missing session"}
+
+        events = _read_events(events_path)
+        summary = _summarize_session(events, session)
+
+        prev = dict(step.get("milestones") or {})
+        fill, reason, flags, missing = _guided_step_progress(step, summary, prev)
+        if reason is not None:
+            step["last_progress_reason"] = reason
+            run["last_progress_reason"] = reason
+        step["milestones"] = flags
+        step["step_progress"] = float(fill)
+
+        idx = int(run.get("step_index") or 0)
+        completed = idx
+        overall = (completed / 9.0) + (float(fill) / 9.0)
+        run["last_progress"] = float(overall)
+
+        age = int(time.time()) - int(step.get("created_ts") or int(time.time()))
+        total_connects = int(summary.get("imap", {}).get("connects") or 0) + int(summary.get("smtp", {}).get("connects") or 0)
+        show_manual = total_connects <= 0 and age >= 25
+
+        ready = all(bool(v) for v in flags.values()) if flags else False
+
+        mode = str(step.get("mode") or "")
+        scenario = str(step.get("scenario") or "")
+        step_label = str(step.get("label") or "")
+
+        resp: dict[str, Any] = {
+            "ok": True,
+            "status": status,
+            "step_index": idx,
+            "step_label": step_label,
+            "scenario": scenario,
+            "mode": mode,
+            "progress": float(overall),
+            "last_progress_reason": run.get("last_progress_reason"),
+            "ready": bool(ready),
+            "missing": missing,
+            "instructions_html": _guided_instructions_html(step),
+            "credentials_html": _guided_step_credentials_html(session),
+            "show_manual": bool(show_manual),
+            "manual_html": _guided_manual_html() if show_manual else "",
+        }
+
+        data.setdefault("guided_runs", {})
+        data["guided_runs"][str(run.get("run_id"))] = run
+        _save_store(store_path, data)
+        return resp
+
+    @app.get("/api/guided/run/{run_id}")
+    def api_guided_get(req: Request, run_id: str) -> JSONResponse:
+        ip = _client_ip(req)
+        data = _load_store(store_path)
+        run = _guided_get_run(data, run_id)
+        if run is None:
+            return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
+        if str(run.get("ip")) != ip:
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
+        resp = _guided_state_response(data, run)
+        if not resp.get("ok"):
+            return JSONResponse(resp, status_code=int(HTTPStatus.BAD_REQUEST))
+        return JSONResponse(resp)
+
+    @app.post("/api/guided/run/{run_id}/confirm")
+    def api_guided_confirm(req: Request, run_id: str) -> JSONResponse:
+        ip = _client_ip(req)
+        data = _load_store(store_path)
+        run = _guided_get_run(data, run_id)
+        if run is None:
+            return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
+        if str(run.get("ip")) != ip:
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
+        if str(run.get("status")) != "running":
+            return JSONResponse({"ok": False, "error": "not running"}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        step = _guided_current_step(run)
+        if step is None:
+            return JSONResponse({"ok": False, "error": "invalid step"}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        session = str(step.get("session") or "")
+        events = _read_events(events_path)
+        summary = _summarize_session(events, session)
+        prev = dict(step.get("milestones") or {})
+        fill, _, flags, missing = _guided_step_progress(step, summary, prev)
+        step["milestones"] = flags
+        step["step_progress"] = float(fill)
+        ready = all(bool(v) for v in flags.values()) if flags else False
+        if not ready:
+            return JSONResponse({"ok": False, "error": "not ready", "missing": missing}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        _guided_finish_step(step, summary)
+        _guided_advance_run(data, run)
+        data.setdefault("guided_runs", {})
+        data["guided_runs"][run_id] = run
+        _save_store(store_path, data)
+        return JSONResponse({"ok": True})
+
+    @app.post("/api/guided/run/{run_id}/skip")
+    def api_guided_skip(req: Request, run_id: str) -> JSONResponse:
+        ip = _client_ip(req)
+        data = _load_store(store_path)
+        run = _guided_get_run(data, run_id)
+        if run is None:
+            return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
+        if str(run.get("ip")) != ip:
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
+        if str(run.get("status")) != "running":
+            return JSONResponse({"ok": False, "error": "not running"}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        step = _guided_current_step(run)
+        if step is None:
+            return JSONResponse({"ok": False, "error": "invalid step"}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        session = str(step.get("session") or "")
+        events = _read_events(events_path)
+        summary = _summarize_session(events, session)
+        _guided_finish_step(step, summary, forced_verdict="SKIPPED")
+        _guided_advance_run(data, run)
+        data.setdefault("guided_runs", {})
+        data["guided_runs"][run_id] = run
+        _save_store(store_path, data)
+        return JSONResponse({"ok": True})
+
+    @app.post("/api/guided/run/{run_id}/abort")
+    def api_guided_abort(req: Request, run_id: str) -> JSONResponse:
+        ip = _client_ip(req)
+        data = _load_store(store_path)
+        run = _guided_get_run(data, run_id)
+        if run is None:
+            return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
+        if str(run.get("ip")) != ip:
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
+        if str(run.get("status")) not in {"running", "aborted"}:
+            return JSONResponse({"ok": False, "error": "cannot abort"}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        run["status"] = "aborted"
+        run["aborted_ts"] = int(time.time())
+        data["overrides"] = [o for o in data.get("overrides", []) if o.get("ip") != ip]
+        run["last_progress"] = float(run.get("last_progress") or 0.0)
+        data.setdefault("guided_runs", {})
+        data["guided_runs"][run_id] = run
+        _save_store(store_path, data)
+        return JSONResponse({"ok": True})
 
     @app.exception_handler(Exception)
     def _err(_: Request, exc: Exception) -> JSONResponse:
@@ -694,11 +1490,22 @@ def main() -> int:
     ap.add_argument("--listen-host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--hostname", default="selftest.nsipmail.de")
+    ap.add_argument("--autodetect-domain", default=(os.environ.get("NSIP_SELFTEST_AUTODETECT_DOMAIN") or ""))
     ap.add_argument("--store", default="/var/lib/nsip-selftest/mode.json")
     ap.add_argument("--events", default="/var/log/nsip-selftest/events.jsonl")
     args = ap.parse_args()
 
-    app = create_app(args.hostname, Path(args.store), Path(args.events))
+    autodetect_domain = args.autodetect_domain.strip()
+    if not autodetect_domain:
+        try:
+            ip = socket.gethostbyname(args.hostname)
+            if ip.count(".") == 3:
+                autodetect_domain = f"{ip}.nip.io"
+        except Exception:
+            autodetect_domain = ""
+    autodetect_domain = autodetect_domain or args.hostname
+
+    app = create_app(args.hostname, autodetect_domain, Path(args.store), Path(args.events))
 
     import uvicorn  # local import
 

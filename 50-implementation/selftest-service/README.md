@@ -44,6 +44,7 @@ Notes:
 
 - Ports `<1024` require root or capabilities.
 - The server logs `server_port` per event so you can see which port the client used.
+- In test modes `t1`–`t4`, the server intentionally **blocks implicit TLS** endpoints (`IMAPS 993`, `SMTPS 465`) by disconnecting immediately. This forces clients that prefer implicit TLS to retry on STARTTLS ports so the downgrade decision points are observable (paper-style behavior).
 
 ## Modes (testcases)
 
@@ -53,34 +54,73 @@ Modes approximate different disruption patterns:
 - `t1`: does **not** advertise STARTTLS (capability stripping equivalent).
 - `t2`: advertises STARTTLS, replies OK/Ready, then drops (approx handshake failure).
 - `t3`: advertises STARTTLS but rejects the STARTTLS command.
-- `t4`: completes TLS, then disrupts after auth/login (post-handshake disruption-like).
+- `t4`: completes TLS handshake, then disrupts the session by injecting unexpected data (e.g., `NOOP`) and closing.
 
-## DNS setup (SRV autodetect; no provider XML)
+## DNS setup (A-record based; no SRV)
 
 This service intentionally **does not** provide Thunderbird Autoconfig XML.
-Autodetect support is via **DNS SRV** only (client support varies).
 
-Required:
+The recommended way to run the self-test is **manual configuration** (paper-compatible and most reproducible).
 
-- `A` record:
-  - `selftest.nsipmail.de -> <public IP>`
+For autodetect/heuristic setup, this deployment relies on **A records only** (SRV is intentionally not used).
 
-Recommended SRV records for the same hostname:
+Required A records:
 
-- `_imap._tcp.selftest.nsipmail.de` → port `143`, target `selftest.nsipmail.de.`
-- `_imaps._tcp.selftest.nsipmail.de` → port `993`, target `selftest.nsipmail.de.`
-- `_submission._tcp.selftest.nsipmail.de` → port `587`, target `selftest.nsipmail.de.`
-- `_submissions._tcp.selftest.nsipmail.de` → port `465`, target `selftest.nsipmail.de.`
-- `_smtp._tcp.selftest.nsipmail.de` → port `25`, target `selftest.nsipmail.de.` (optional)
+- `selftest.nsipmail.de -> <public IP>`
+- `imap.selftest.nsipmail.de -> <public IP>`
+- `smtp.selftest.nsipmail.de -> <public IP>`
+- `mail.selftest.nsipmail.de -> <public IP>`
+
+### nip.io-based autodetect domain (recommended default)
+
+Some clients (notably Thunderbird) may use a central provider database (Mozilla/Thunderbird ISPDB) and suggest hosted-provider endpoints based on the email domain. To reduce this interference, the WebUI supports using an autodetect domain derived from the server IP via **nip.io**.
+
+- The WebUI can show an email address like `test-SESSION@<public-ip>.nip.io`.
+- The corresponding hostnames used for autodetect are:
+  - `imap.<public-ip>.nip.io`
+  - `smtp.<public-ip>.nip.io`
+
+You can override the autodetect domain explicitly:
+
+- WebUI CLI: `--autodetect-domain <domain>`
+- Env var: `NSIP_SELFTEST_AUTODETECT_DOMAIN=<domain>`
+
+Important limitation:
+
+- Some clients (notably Thunderbird) may use a central provider database (Mozilla/Thunderbird ISPDB) and suggest hosted-provider endpoints even when DNS-based discovery is unavailable. This is outside the control of this service.
 
 ## Usage (end user workflow)
+
+### Quickstart (recommended): Guided mode
+
+Guided mode runs a fixed 9-step sequence and tells the user exactly what to do per testcase.
+
+- Open: `https://selftest.nsipmail.de/guided`
+- Follow the instructions for each step.
+- Use the shown **Email** / **Username** / **Password** in your mail client.
+  - The UI provides small copy-to-clipboard buttons next to values.
+- Press **I did the steps** once you performed the client action.
+
+Notes:
+
+- Guided mode is the recommended default because it reduces user error and makes results comparable across clients.
+- **Skip anyway** is a fallback if the client is stuck and does not reach the expected connection/auth stage.
+- **Abort** stops the run.
+
+### Advanced mode (manual selection)
+
+If you want to test a single testcase only:
+
+- Open: `https://selftest.nsipmail.de/?view=advanced` (or pick a scenario from `/`)
+- Choose a mode (`baseline`, `t1`–`t4`) and scenario (`immediate` / `two_phase`).
+- Start a session and open the status page.
 
 ### 1) Start a session
 
 - Open the WebUI (e.g. `https://selftest.nsipmail.de/`).
 - Choose a testcase mode.
 - The UI shows:
-  - email address (`test-SESSION@selftest.nsipmail.de`) for autodetect,
+  - email address (`test-SESSION@<autodetect domain>`) for autodetect,
   - username (`test-SESSION`),
   - password (any value; ignored).
 
@@ -93,10 +133,9 @@ Recommended (STARTTLS test):
 - IMAP `143` STARTTLS
 - SMTP `587` STARTTLS
 
-Optional (implicit TLS variant):
+Note:
 
-- IMAPS `993` SSL/TLS
-- SMTPS `465` SSL/TLS
+- In test modes `t1`–`t4`, the service intentionally disconnects implicit TLS ports (`993`/`465`) so clients fall back to STARTTLS ports.
 
 ### 3) Trigger events
 
@@ -106,7 +145,15 @@ Optional (implicit TLS variant):
 ### 4) Check results
 
 - Open the session status page from the WebUI.
-- The service reports whether it observed any **plaintext LOGIN/AUTH** events (i.e., auth attempted with `tls=false`).
+- The WebUI computes a verdict:
+  - `FAIL`: the service observed an auth/login attempt with `tls=false` (plaintext credentials exposure).
+  - `PASS`: the service observed an auth/login attempt with `tls=true` and no plaintext auth.
+  - `INCONCLUSIVE`: no auth/login attempt was observed (client aborted early, stuck retrying, or only probed STARTTLS).
+
+For guided runs:
+
+- Each step gets its own verdict. If a step was skipped via the UI, it is labeled `SKIPPED`.
+- The guided results table provides a per-step **View logs** link that opens `/status?session=...` for that step.
 
 ## Deployment (AWS EC2 example)
 
@@ -138,6 +185,27 @@ Expected cert paths:
 
 - `/etc/letsencrypt/live/selftest.nsipmail.de/fullchain.pem`
 - `/etc/letsencrypt/live/selftest.nsipmail.de/privkey.pem`
+
+The certificate presented by the mail self-test server must be valid for the hostnames that clients will actually connect to.
+
+At minimum, include SANs for:
+
+- `selftest.nsipmail.de`
+- `imap.selftest.nsipmail.de`
+- `smtp.selftest.nsipmail.de`
+- `mail.selftest.nsipmail.de`
+
+If you use the nip.io autodetect domain, also include SANs for the specific IP-derived names used by the WebUI, for example:
+
+- `<public-ip>.nip.io`
+- `imap.<public-ip>.nip.io`
+- `smtp.<public-ip>.nip.io`
+- `mail.<public-ip>.nip.io`
+
+If you deploy additional discovery endpoints (not enabled by default in this project), also include SANs for:
+
+- `autoconfig.<autodetect-domain>`
+- `autodiscover.<autodetect-domain>`
 
 ### systemd
 
@@ -240,8 +308,10 @@ sudo tail -n 50 /var/log/nsip-selftest/events.jsonl
 
 ### Autodetect finds the wrong provider
 
-- Ensure you enter an address like `test-SESSION@selftest.nsipmail.de` (the domain controls autodetect).
-- DNS propagation/caching can delay SRV changes.
+- Prefer **Manual configuration** (ports `143/587` with STARTTLS).
+- Some clients (notably Thunderbird) may use Mozilla/Thunderbird ISPDB and propose hosted-provider endpoints (outside of this service's control).
+- If you see ISPDB interference, use the WebUI-provided nip.io-based email domain and hostnames.
+- DNS propagation/caching can delay A-record changes.
 
 ### No events show up
 

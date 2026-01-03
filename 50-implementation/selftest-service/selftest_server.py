@@ -19,6 +19,8 @@ import re
 class ModeDecision:
     mode: str
     source: str
+    session: Optional[str] = None
+    active: bool = True
 
 
 _SESSION_RE = re.compile(r"^test-([A-Za-z0-9]{6,64})$")
@@ -64,16 +66,57 @@ def _smtp_username_from_auth_plain(initial_response_b64: bytes) -> Optional[str]
 def _load_mode_store(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"default_mode": "baseline", "overrides": []}
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(raw.lstrip())
+            if isinstance(obj, dict):
+                if "default_mode" not in obj:
+                    obj["default_mode"] = "baseline"
+                if "overrides" not in obj:
+                    obj["overrides"] = []
+                _save_mode_store(path, obj)
+                return obj
+        except Exception:
+            pass
+        fallback: dict[str, Any] = {"default_mode": "baseline", "overrides": []}
+        _save_mode_store(path, fallback)
+        return fallback
 
 
 def _save_mode_store(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{secrets.token_hex(6)}.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f)
     os.replace(tmp, path)
+
+
+def _activate_override_session(mode_store_path: Path, client_ip: str, session: str) -> None:
+    data = _load_mode_store(mode_store_path)
+    now = int(time.time())
+
+    overrides: list[dict[str, Any]] = []
+    changed = False
+    for o in data.get("overrides", []):
+        exp = int(o.get("expires", 0))
+        if exp and exp < now:
+            continue
+
+        if o.get("ip") == client_ip and str(o.get("session") or "") == session:
+            if not bool(o.get("activated", False)):
+                o = dict(o)
+                o["activated"] = True
+                o["activated_ts"] = now
+                changed = True
+        overrides.append(o)
+
+    if overrides != data.get("overrides", []) or changed:
+        data["overrides"] = overrides
+        _save_mode_store(mode_store_path, data)
 
 
 def _decide_mode(mode_store_path: Path, client_ip: str) -> ModeDecision:
@@ -89,7 +132,15 @@ def _decide_mode(mode_store_path: Path, client_ip: str) -> ModeDecision:
             continue
         overrides.append(o)
         if o.get("ip") == client_ip and chosen is None:
-            chosen = ModeDecision(mode=str(o.get("mode", "baseline")), source=f"override:{client_ip}")
+            sess = o.get("session")
+            mode = str(o.get("mode", "baseline"))
+            session = (str(sess) if sess is not None else None)
+            activated = bool(o.get("activated", False))
+            scenario = str(o.get("scenario", "immediate") or "immediate")
+            active = True
+            if session is not None and mode in {"t1", "t2", "t3", "t4"} and scenario == "two_phase":
+                active = activated
+            chosen = ModeDecision(mode=mode, source=f"override:{client_ip}", session=session, active=active)
 
     if overrides != data.get("overrides", []):
         data["overrides"] = overrides
@@ -98,7 +149,13 @@ def _decide_mode(mode_store_path: Path, client_ip: str) -> ModeDecision:
     if chosen is not None:
         return chosen
 
-    return ModeDecision(mode=str(data.get("default_mode", "baseline")), source="default")
+    return ModeDecision(mode=str(data.get("default_mode", "baseline")), source="default", session=None, active=True)
+
+
+def _should_block_implicit_tls(mode: str, server_port: int) -> bool:
+    if mode not in {"t1", "t2", "t3", "t4"}:
+        return False
+    return server_port in {465, 993}
 
 
 def _log_event(log_path: Optional[Path], event: dict[str, Any]) -> None:
@@ -144,6 +201,33 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
         tls_active = isinstance(sock, ssl.SSLSocket)
         server_port = int(self.server.server_address[1])
 
+        if tls_active and _should_block_implicit_tls(dec.mode, server_port):
+            _log_event(
+                self.server.log_path,
+                {
+                    "ts": int(time.time()),
+                    "proto": "smtp",
+                    "client_ip": client_ip,
+                    "mode": dec.mode,
+                    "mode_source": dec.source,
+                    "override_session": dec.session,
+                    "session": None,
+                    "tls": tls_active,
+                    "server_port": server_port,
+                    "event": "disconnect",
+                    "reason": "implicit_tls_blocked",
+                },
+            )
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return
+
         _log_event(
             self.server.log_path,
             {
@@ -152,6 +236,8 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                 "client_ip": client_ip,
                 "mode": dec.mode,
                 "mode_source": dec.source,
+                "override_session": dec.session,
+                "session": None,
                 "tls": tls_active,
                 "server_port": server_port,
                 "event": "connect",
@@ -172,6 +258,21 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
         while True:
             line = io.recv_line()
             if line is None:
+                _log_event(
+                    self.server.log_path,
+                    {
+                        "ts": int(time.time()),
+                        "proto": "smtp",
+                        "client_ip": client_ip,
+                        "mode": dec.mode,
+                        "mode_source": dec.source,
+                        "override_session": dec.session,
+                        "session": None,
+                        "tls": tls_active,
+                        "server_port": server_port,
+                        "event": "disconnect",
+                    },
+                )
                 return
             u = line.upper()
 
@@ -202,6 +303,7 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
 
             if pending_auth_login:
                 # AUTH LOGIN continuation (base64 username/password). We do not log/store the password.
+                was_active = dec.active
                 txt = _b64decode_to_text(line.strip())
                 if pending_auth_login_username is None:
                     pending_auth_login_username = txt or ""
@@ -209,7 +311,26 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                     continue
 
                 username = pending_auth_login_username
-                session = _extract_session_from_username(username) if username else None
+                username_session = _extract_session_from_username(username) if username else None
+                session = username_session
+                if dec.session and username_session and dec.session != username_session:
+                    _log_event(
+                        self.server.log_path,
+                        {
+                            "ts": int(time.time()),
+                            "proto": "smtp",
+                            "client_ip": client_ip,
+                            "mode": dec.mode,
+                            "mode_source": dec.source,
+                            "tls": tls_active,
+                            "server_port": server_port,
+                            "event": "session_mismatch",
+                            "override_session": dec.session,
+                            "session": None,
+                            "username": username,
+                            "username_session": username_session,
+                        },
+                    )
                 _log_event(
                     self.server.log_path,
                     {
@@ -223,10 +344,19 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                         "event": "auth_login",
                         "username": username,
                         "session": session,
+                        "username_session": username_session,
                     },
                 )
+                if (
+                    (not was_active)
+                    and (dec.mode in {"t1", "t2", "t3", "t4"})
+                    and dec.session
+                    and username_session
+                    and (username_session == dec.session)
+                ):
+                    _activate_override_session(self.server.mode_store_path, client_ip, username_session)
                 io.send(b"235 2.7.0 Authentication successful\r\n")
-                if dec.mode in {"t4"} and tls_active:
+                if was_active and (dec.mode in {"t4"}) and tls_active:
                     _log_event(
                         self.server.log_path,
                         {
@@ -263,7 +393,7 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                 continue
 
             if u.startswith(b"EHLO") or u.startswith(b"HELO"):
-                starttls_advertised = (not tls_active) and (dec.mode not in {"t1"})
+                starttls_advertised = (not tls_active) and ((dec.mode not in {"t1"}) or (not dec.active))
                 _log_event(
                     self.server.log_path,
                     {
@@ -272,6 +402,8 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                         "client_ip": client_ip,
                         "mode": dec.mode,
                         "mode_source": dec.source,
+                        "override_session": dec.session,
+                        "session": None,
                         "tls": tls_active,
                         "server_port": server_port,
                         "event": "ehlo",
@@ -288,14 +420,6 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
 
             if u.startswith(b"STARTTLS"):
                 if tls_active:
-                    io.send(b"454 TLS not available due to temporary reason\r\n")
-                    continue
-                if dec.mode in {"t3"}:
-                    io.send(b"454 TLS not available due to temporary reason\r\n")
-                    continue
-
-                io.send(b"220 2.0.0 Ready to start TLS\r\n")
-                if dec.mode in {"t2"}:
                     _log_event(
                         self.server.log_path,
                         {
@@ -304,21 +428,157 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
+                            "override_session": dec.session,
+                            "session": None,
+                            "tls": tls_active,
+                            "server_port": server_port,
+                            "event": "starttls",
+                            "result": "already_tls",
+                        },
+                    )
+                    io.send(b"454 TLS not available due to temporary reason\r\n")
+                    continue
+                if dec.active and (dec.mode in {"t3"}):
+                    _log_event(
+                        self.server.log_path,
+                        {
+                            "ts": int(time.time()),
+                            "proto": "smtp",
+                            "client_ip": client_ip,
+                            "mode": dec.mode,
+                            "mode_source": dec.source,
+                            "override_session": dec.session,
+                            "session": None,
+                            "tls": tls_active,
+                            "server_port": server_port,
+                            "event": "starttls",
+                            "result": "refused",
+                        },
+                    )
+                    io.send(b"454 TLS not available due to temporary reason\r\n")
+                    continue
+
+                io.send(b"220 2.0.0 Ready to start TLS\r\n")
+                if dec.active and (dec.mode in {"t2"}):
+                    _log_event(
+                        self.server.log_path,
+                        {
+                            "ts": int(time.time()),
+                            "proto": "smtp",
+                            "client_ip": client_ip,
+                            "mode": dec.mode,
+                            "mode_source": dec.source,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "starttls",
                             "result": "drop_after_ready",
                         },
                     )
+                    _log_event(
+                        self.server.log_path,
+                        {
+                            "ts": int(time.time()),
+                            "proto": "smtp",
+                            "client_ip": client_ip,
+                            "mode": dec.mode,
+                            "mode_source": dec.source,
+                            "override_session": dec.session,
+                            "session": None,
+                            "tls": tls_active,
+                            "server_port": server_port,
+                            "event": "disconnect",
+                        },
+                    )
                     return
+
+                _log_event(
+                    self.server.log_path,
+                    {
+                        "ts": int(time.time()),
+                        "proto": "smtp",
+                        "client_ip": client_ip,
+                        "mode": dec.mode,
+                        "mode_source": dec.source,
+                        "override_session": dec.session,
+                        "session": None,
+                        "tls": tls_active,
+                        "server_port": server_port,
+                        "event": "starttls",
+                        "result": "ok",
+                    },
+                )
 
                 try:
                     tls_sock = self.server.ssl_context.wrap_socket(sock, server_side=True)
                 except Exception:
+                    _log_event(
+                        self.server.log_path,
+                        {
+                            "ts": int(time.time()),
+                            "proto": "smtp",
+                            "client_ip": client_ip,
+                            "mode": dec.mode,
+                            "mode_source": dec.source,
+                            "override_session": dec.session,
+                            "session": None,
+                            "tls": tls_active,
+                            "server_port": server_port,
+                            "event": "starttls",
+                            "result": "wrap_failed",
+                        },
+                    )
                     return
                 sock = tls_sock
                 io = _LineIO(sock)
                 tls_active = True
+                if dec.active and (dec.mode in {"t4"}):
+                    _log_event(
+                        self.server.log_path,
+                        {
+                            "ts": int(time.time()),
+                            "proto": "smtp",
+                            "client_ip": client_ip,
+                            "mode": dec.mode,
+                            "mode_source": dec.source,
+                            "override_session": dec.session,
+                            "session": None,
+                            "tls": tls_active,
+                            "server_port": server_port,
+                            "event": "disrupt",
+                            "reason": "after_handshake",
+                            "payload": "NOOP",
+                        },
+                    )
+                    try:
+                        io.send(b"NOOP\r\n")
+                    except Exception:
+                        pass
+                    _log_event(
+                        self.server.log_path,
+                        {
+                            "ts": int(time.time()),
+                            "proto": "smtp",
+                            "client_ip": client_ip,
+                            "mode": dec.mode,
+                            "mode_source": dec.source,
+                            "override_session": dec.session,
+                            "session": None,
+                            "tls": tls_active,
+                            "server_port": server_port,
+                            "event": "disconnect",
+                        },
+                    )
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except Exception:
+                        pass
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+                    return
                 continue
 
             if u.startswith(b"MAIL FROM:"):
@@ -347,6 +607,7 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
             if u.startswith(b"AUTH"):
                 # Handle common mechanisms enough to learn the username/session.
                 # Never log raw payloads (they can contain credentials).
+                was_active = dec.active
                 parts = line.split()
                 mech = parts[1].decode("utf-8", errors="replace") if len(parts) >= 2 else ""
                 mech_u = mech.upper()
@@ -367,7 +628,26 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                     io.send(b"334 VXNlcm5hbWU6\r\n")
                     continue
 
-                session = _extract_session_from_username(username) if username else None
+                username_session = _extract_session_from_username(username) if username else None
+                session = username_session
+                if dec.session and username_session and dec.session != username_session:
+                    _log_event(
+                        self.server.log_path,
+                        {
+                            "ts": int(time.time()),
+                            "proto": "smtp",
+                            "client_ip": client_ip,
+                            "mode": dec.mode,
+                            "mode_source": dec.source,
+                            "tls": tls_active,
+                            "server_port": server_port,
+                            "event": "session_mismatch",
+                            "override_session": dec.session,
+                            "session": None,
+                            "username": username,
+                            "username_session": username_session,
+                        },
+                    )
                 _log_event(
                     self.server.log_path,
                     {
@@ -382,26 +662,18 @@ class SelfTestSMTPHandler(socketserver.BaseRequestHandler):
                         "auth_mech": mech_u or None,
                         "username": username,
                         "session": session,
+                        "username_session": username_session,
                     },
                 )
+                if (
+                    (not was_active)
+                    and (dec.mode in {"t1", "t2", "t3", "t4"})
+                    and dec.session
+                    and username_session
+                    and (username_session == dec.session)
+                ):
+                    _activate_override_session(self.server.mode_store_path, client_ip, username_session)
                 io.send(b"235 2.7.0 Authentication successful\r\n")
-
-                if dec.mode in {"t4"} and tls_active:
-                    _log_event(
-                        self.server.log_path,
-                        {
-                            "ts": int(time.time()),
-                            "proto": "smtp",
-                            "client_ip": client_ip,
-                            "mode": dec.mode,
-                            "mode_source": dec.source,
-                            "tls": tls_active,
-                            "server_port": server_port,
-                            "event": "drop",
-                            "reason": "after_auth",
-                        },
-                    )
-                    return
                 continue
 
             io.send(b"250 OK\r\n")
@@ -418,6 +690,33 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
         tls_active = isinstance(sock, ssl.SSLSocket)
         server_port = int(self.server.server_address[1])
 
+        if tls_active and _should_block_implicit_tls(dec.mode, server_port):
+            _log_event(
+                self.server.log_path,
+                {
+                    "ts": int(time.time()),
+                    "proto": "imap",
+                    "client_ip": client_ip,
+                    "mode": dec.mode,
+                    "mode_source": dec.source,
+                    "override_session": dec.session,
+                    "session": None,
+                    "tls": tls_active,
+                    "server_port": server_port,
+                    "event": "disconnect",
+                    "reason": "implicit_tls_blocked",
+                },
+            )
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return
+
         _log_event(
             self.server.log_path,
             {
@@ -426,6 +725,8 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                 "client_ip": client_ip,
                 "mode": dec.mode,
                 "mode_source": dec.source,
+                "override_session": dec.session,
+                "session": None,
                 "tls": tls_active,
                 "server_port": server_port,
                 "event": "connect",
@@ -438,6 +739,21 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
         while True:
             line = io.recv_line()
             if line is None:
+                _log_event(
+                    self.server.log_path,
+                    {
+                        "ts": int(time.time()),
+                        "proto": "imap",
+                        "client_ip": client_ip,
+                        "mode": dec.mode,
+                        "mode_source": dec.source,
+                        "override_session": dec.session,
+                        "session": None,
+                        "tls": tls_active,
+                        "server_port": server_port,
+                        "event": "disconnect",
+                    },
+                )
                 return
 
             parts = line.split(maxsplit=1)
@@ -461,14 +777,16 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                         "client_ip": client_ip,
                         "mode": dec.mode,
                         "mode_source": dec.source,
+                        "override_session": dec.session,
+                        "session": None,
                         "tls": tls_active,
                         "event": "capability",
                         "server_port": server_port,
-                        "starttls_advertised": (not tls_active) and (dec.mode not in {"t1"}),
+                        "starttls_advertised": (not tls_active) and ((dec.mode not in {"t1"}) or (not dec.active)),
                     },
                 )
                 caps = [b"IMAP4rev1", b"AUTH=PLAIN", b"AUTH=LOGIN"]
-                if (not tls_active) and (dec.mode not in {"t1"}):
+                if (not tls_active) and ((dec.mode not in {"t1"}) or (not dec.active)):
                     caps.append(b"STARTTLS")
                 io.send(b"* CAPABILITY " + b" ".join(caps) + b"\r\n")
                 io.send(tag + b" OK CAPABILITY completed\r\n")
@@ -484,6 +802,8 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "starttls",
@@ -492,7 +812,7 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                     )
                     io.send(tag + b" BAD STARTTLS not available\r\n")
                     continue
-                if dec.mode in {"t1"}:
+                if dec.active and (dec.mode in {"t1"}):
                     _log_event(
                         self.server.log_path,
                         {
@@ -501,6 +821,8 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "starttls",
@@ -509,7 +831,7 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                     )
                     io.send(tag + b" BAD STARTTLS not available\r\n")
                     continue
-                if dec.mode in {"t3"}:
+                if dec.active and (dec.mode in {"t3"}):
                     _log_event(
                         self.server.log_path,
                         {
@@ -518,6 +840,8 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                             "client_ip": client_ip,
                             "mode": dec.mode,
                             "mode_source": dec.source,
+                            "override_session": dec.session,
+                            "session": None,
                             "tls": tls_active,
                             "server_port": server_port,
                             "event": "starttls",
@@ -526,6 +850,41 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                     )
                     io.send(tag + b" BAD STARTTLS not available\r\n")
                     continue
+
+                io.send(tag + b" OK Begin TLS negotiation now\r\n")
+                if dec.active and (dec.mode in {"t2"}):
+                    _log_event(
+                        self.server.log_path,
+                        {
+                            "ts": int(time.time()),
+                            "proto": "imap",
+                            "client_ip": client_ip,
+                            "mode": dec.mode,
+                            "mode_source": dec.source,
+                            "override_session": dec.session,
+                            "session": None,
+                            "tls": tls_active,
+                            "server_port": server_port,
+                            "event": "starttls",
+                            "result": "drop_after_ok",
+                        },
+                    )
+                    _log_event(
+                        self.server.log_path,
+                        {
+                            "ts": int(time.time()),
+                            "proto": "imap",
+                            "client_ip": client_ip,
+                            "mode": dec.mode,
+                            "mode_source": dec.source,
+                            "override_session": dec.session,
+                            "session": None,
+                            "tls": tls_active,
+                            "server_port": server_port,
+                            "event": "disconnect",
+                        },
+                    )
+                    return
 
                 _log_event(
                     self.server.log_path,
@@ -535,29 +894,14 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                         "client_ip": client_ip,
                         "mode": dec.mode,
                         "mode_source": dec.source,
+                        "override_session": dec.session,
+                        "session": None,
                         "tls": tls_active,
                         "server_port": server_port,
                         "event": "starttls",
                         "result": "ok",
                     },
                 )
-                io.send(tag + b" OK Begin TLS negotiation now\r\n")
-                if dec.mode in {"t2"}:
-                    _log_event(
-                        self.server.log_path,
-                        {
-                            "ts": int(time.time()),
-                            "proto": "imap",
-                            "client_ip": client_ip,
-                            "mode": dec.mode,
-                            "mode_source": dec.source,
-                            "tls": tls_active,
-                            "server_port": server_port,
-                            "event": "starttls",
-                            "result": "drop_after_ok",
-                        },
-                    )
-                    return
 
                 try:
                     tls_sock = self.server.ssl_context.wrap_socket(sock, server_side=True)
@@ -566,6 +910,52 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                 sock = tls_sock
                 io = _LineIO(sock)
                 tls_active = True
+                if dec.active and (dec.mode in {"t4"}):
+                    _log_event(
+                        self.server.log_path,
+                        {
+                            "ts": int(time.time()),
+                            "proto": "imap",
+                            "client_ip": client_ip,
+                            "mode": dec.mode,
+                            "mode_source": dec.source,
+                            "override_session": dec.session,
+                            "session": None,
+                            "tls": tls_active,
+                            "server_port": server_port,
+                            "event": "disrupt",
+                            "reason": "after_handshake",
+                            "payload": "NOOP",
+                        },
+                    )
+                    try:
+                        io.send(b"NOOP\r\n")
+                    except Exception:
+                        pass
+                    _log_event(
+                        self.server.log_path,
+                        {
+                            "ts": int(time.time()),
+                            "proto": "imap",
+                            "client_ip": client_ip,
+                            "mode": dec.mode,
+                            "mode_source": dec.source,
+                            "override_session": dec.session,
+                            "session": None,
+                            "tls": tls_active,
+                            "server_port": server_port,
+                            "event": "disconnect",
+                        },
+                    )
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except Exception:
+                        pass
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+                    return
                 continue
 
             if ucmd.startswith(b"NOOP") or ucmd.startswith(b"CHECK") or ucmd.startswith(b"STATUS") or ucmd.startswith(b"SELECT") or ucmd.startswith(b"EXAMINE"):
@@ -590,6 +980,7 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
             if ucmd.startswith(b"LOGIN"):
                 # LOGIN typically carries username+password in cleartext on the wire.
                 # Do not log the password; only log username/session + whether TLS was active.
+                was_active = dec.active
                 username: Optional[str] = None
                 try:
                     # cmd starts with "LOGIN ..." (bytes)
@@ -599,7 +990,26 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                         username = _strip_quotes(fields[0].decode("utf-8", errors="replace"))
                 except Exception:
                     username = None
-                session = _extract_session_from_username(username) if username else None
+                username_session = _extract_session_from_username(username) if username else None
+                session = username_session
+                if dec.session and username_session and dec.session != username_session:
+                    _log_event(
+                        self.server.log_path,
+                        {
+                            "ts": int(time.time()),
+                            "proto": "imap",
+                            "client_ip": client_ip,
+                            "mode": dec.mode,
+                            "mode_source": dec.source,
+                            "tls": tls_active,
+                            "server_port": server_port,
+                            "event": "session_mismatch",
+                            "override_session": dec.session,
+                            "session": None,
+                            "username": username,
+                            "username_session": username_session,
+                        },
+                    )
                 _log_event(
                     self.server.log_path,
                     {
@@ -613,26 +1023,18 @@ class SelfTestIMAPHandler(socketserver.BaseRequestHandler):
                         "event": "login_command",
                         "username": username,
                         "session": session,
+                        "username_session": username_session,
                     },
                 )
-                io.send(tag + b" OK Logged in\r\n")
-                if dec.mode in {"t4"} and tls_active:
-                    _log_event(
-                        self.server.log_path,
-                        {
-                            "ts": int(time.time()),
-                            "proto": "imap",
-                            "client_ip": client_ip,
-                            "mode": dec.mode,
-                            "mode_source": dec.source,
-                            "tls": tls_active,
-                            "server_port": server_port,
-                            "event": "drop",
-                            "reason": "after_login",
-                        },
-                    )
-                    io.send(b"* BYE Connection lost\r\n")
-                    return
+                if (
+                    (not was_active)
+                    and (dec.mode in {"t1", "t2", "t3", "t4"})
+                    and dec.session
+                    and username_session
+                    and (username_session == dec.session)
+                ):
+                    _activate_override_session(self.server.mode_store_path, client_ip, username_session)
+                io.send(tag + b" OK LOGIN completed\r\n")
                 continue
 
             io.send(tag + b" OK\r\n")
