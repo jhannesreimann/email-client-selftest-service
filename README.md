@@ -15,11 +15,26 @@
 | **I** | MITM Framework | ✅ Ready | Test cases T1-T4 integrated |
 | **I** | Client Testing | 🔄 In Progress | First results in `60-findings/` |
 | **II** | Attack Demonstrations | 📋 Planned | Q1 2026 |
-| **II** | Certificate Tests | 📋 Planned | Q1 2026 |
+| **II** | Certificate Tests | ❓ Planned | Q1 2026 |
 
-**Next Milestone:** Complete mitmproxy setup and execute first STARTTLS stripping attack (T1)
+**Next Milestone:** Intermediate Presentation (Phase I) + expand multi-client testing using the public self-test service
 
 ---
+
+## Selftest Service (current main implementation)
+
+We implemented and deployed a public, client-facing self-test service to evaluate whether mail clients can be coerced into plaintext authentication under STARTTLS disruption.
+
+- **Public instance:** https://selftest.nsipmail.de
+- **Source code:** [`50-implementation/selftest-service/`](./50-implementation/selftest-service/)
+
+Key capabilities:
+
+- **Guided mode (recommended):** step-by-step 9-step sequence (Baseline, Immediate T1–T4, Two-phase T1–T4)
+- **Advanced mode:** manual selection of testcase and scenario
+- **Outcome computation:** PASS/FAIL/INCONCLUSIVE (and SKIPPED in guided runs), with per-step log links
+
+Rationale (high level): simulation provides a public self-test without requiring client-side proxy setup or custom CA installation.
 
 ## 📋 Repository Structure
 
@@ -114,6 +129,10 @@ This repository is organized to facilitate project management, documentation, an
   - O-TLS/STARTTLS ports: 143 (IMAP), 110 (POP3), 587 (SMTP)
   - Valid Let's Encrypt certificates installed
   - Plaintext authentication verified (`disable_plaintext_auth = no`)
+
+- ✅ **Public Selftest Service Operational:** `selftest.nsipmail.de`
+  - Guided and advanced workflows for testing T1–T4-like STARTTLS disruptions
+  - Source: [`50-implementation/selftest-service/`](./50-implementation/selftest-service/)
   
 - ✅ **MITM Scripts Ready:** Original research code from paper authors
   - Test cases T1-T4 for SMTP, IMAP, POP3 (STARTTLS downgrade attacks)
@@ -222,7 +241,8 @@ Our project recreates and extends the research from the NDSS 2025 paper "A Multi
 - ✅ Literature review and paper analysis (NDSS 2025 paper)
 - ✅ Email server testbed deployed (AWS EC2 @ mail.nsipmail.de)
 - ✅ MITM framework ready (mitmproxy with T1-T4 test cases)
-- 🔄 Client testing environment setup
+- ✅ Public self-test service deployed (selftest.nsipmail.de)
+- 🔄 Client testing in progress (expanding across clients/platforms)
 - 📋 Initial attack demonstrations pending
 
 ### Phase II Focus (Upcoming)
@@ -252,4 +272,4 @@ For detailed information about the server setup, attack scripts, and testing met
 
 ---
 
-*Last Updated: November 2025*
+*Last Updated: January 2026*

@@ -205,6 +205,31 @@ h2 {
   letter-spacing: 0.2px;
 }
 
+.pill-pass {
+  background: rgba(34, 197, 94, 0.14);
+  border-color: rgba(34, 197, 94, 0.28);
+}
+
+.pill-fail {
+  background: rgba(239, 68, 68, 0.14);
+  border-color: rgba(239, 68, 68, 0.28);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255,255,255,0.92);
+  font-weight: 650;
+  font-size: 12px;
+  letter-spacing: 0.1px;
+  margin-right: 6px;
+  margin-bottom: 6px;
+}
+
 .kv {
   display: flex;
   justify-content: space-between;
@@ -259,6 +284,13 @@ a:hover { color: #38bdf8; }
   -webkit-backdrop-filter: blur(10px);
 }
 
+.btn-small {
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 12px;
+  font-weight: 650;
+}
+
 .btn:hover {
   transform: translateY(-1px);
   border-color: rgba(14, 165, 233, 0.35);
@@ -271,6 +303,39 @@ a:hover { color: #38bdf8; }
   transition-duration: 0.1s;
 }
 
+.btn-disabled {
+  opacity: 0.45;
+  pointer-events: none;
+  transform: none !important;
+}
+
+.progress-wrap {
+  width: 100%;
+  height: 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(0, 0, 0, 0.22);
+  overflow: hidden;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(14,165,233,0.75), rgba(139,92,246,0.75));
+  transition: width 0.35s ease;
+}
+
+.copy-btn {
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.copy-btn svg {
+  display: block;
+}
+
 .btn-cta {
   width: 100%;
   height: 54px;
@@ -280,6 +345,30 @@ a:hover { color: #38bdf8; }
   box-shadow: 0 14px 44px rgba(0,0,0,0.35);
   font-weight: 800;
   letter-spacing: 0.2px;
+}
+
+.btn-success {
+  border-color: rgba(34, 197, 94, 0.28);
+  background: rgba(34, 197, 94, 0.10);
+  box-shadow: 0 14px 44px rgba(34, 197, 94, 0.08);
+}
+
+.btn-success:hover {
+  border-color: rgba(34, 197, 94, 0.42);
+  background: rgba(34, 197, 94, 0.14);
+  box-shadow: 0 18px 54px rgba(34, 197, 94, 0.12);
+}
+
+.btn-danger {
+  border-color: rgba(239, 68, 68, 0.28);
+  background: rgba(239, 68, 68, 0.10);
+  box-shadow: 0 14px 44px rgba(239, 68, 68, 0.08);
+}
+
+.btn-danger:hover {
+  border-color: rgba(239, 68, 68, 0.42);
+  background: rgba(239, 68, 68, 0.14);
+  box-shadow: 0 18px 54px rgba(239, 68, 68, 0.12);
 }
 
 .btn-cta:hover {

@@ -11,20 +11,35 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 
 def _load_store(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return {"default_mode": "baseline", "overrides": []}
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+        return {"default_mode": "baseline", "overrides": [], "guided_runs": {}}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(raw.lstrip())
+            if isinstance(obj, dict):
+                if "guided_runs" not in obj:
+                    obj["guided_runs"] = {}
+                _save_store(path, obj)
+                return obj
+        except Exception:
+            pass
+        fallback: dict[str, Any] = {"default_mode": "baseline", "overrides": [], "guided_runs": {}}
+        _save_store(path, fallback)
+        return fallback
 
 
 def _save_store(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{secrets.token_hex(6)}.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f)
     os.replace(tmp, path)
@@ -56,6 +71,216 @@ def _new_session_code() -> str:
     raw = secrets.token_urlsafe(8)
     cleaned = "".join(ch for ch in raw if ch.isalnum())
     return (cleaned[:10] or "X")
+
+
+def _guided_steps() -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    out.append({"scenario": "immediate", "mode": "baseline", "label": "Baseline"})
+    for m in ["t1", "t2", "t3", "t4"]:
+        out.append({"scenario": "immediate", "mode": m, "label": f"Immediate {m.upper()}"})
+    for m in ["t1", "t2", "t3", "t4"]:
+        out.append({"scenario": "two_phase", "mode": m, "label": f"Two-phase {m.upper()}"})
+    return out
+
+
+def _guided_new_run_id() -> str:
+    return "".join(ch for ch in secrets.token_urlsafe(12) if ch.isalnum())[:16]
+
+
+def _guided_findings(summary: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    if bool(summary.get("saw_plain")):
+        out.append("plaintext_auth")
+    if bool(summary.get("saw_tls_auth")):
+        out.append("tls_auth")
+    if bool(summary.get("retry_like")):
+        out.append("retry_like")
+    if int(summary.get("starttls_refused_like") or 0) > 0:
+        out.append("starttls_disrupted")
+    return out
+
+
+def _guided_detect_post_activation(events: list[dict[str, Any]]) -> bool:
+    auth_events = {"auth_command", "auth_login", "login_command"}
+    first_auth_idx: Optional[int] = None
+    for i, e in enumerate(events):
+        if e.get("event") in auth_events and e.get("tls") is True:
+            first_auth_idx = i
+            break
+    if first_auth_idx is None:
+        return False
+    for e in events[first_auth_idx + 1 :]:
+        if e.get("event") in {"connect", "starttls", "disrupt", "drop", "disconnect"}:
+            return True
+    return False
+
+
+def _guided_milestones(step: dict[str, Any], summary: dict[str, Any]) -> list[dict[str, Any]]:
+    smtp = summary.get("smtp", {})
+    imap = summary.get("imap", {})
+    retry_like = bool(summary.get("retry_like"))
+    starttls_refused_like = int(summary.get("starttls_refused_like") or 0)
+    saw_any_auth = bool(summary.get("saw_plain")) or bool(summary.get("saw_tls_auth"))
+
+    imap_connect = int(imap.get("connects") or 0) >= 1
+    smtp_attempt = int(smtp.get("connects") or 0) >= 1
+    imap_activity = saw_any_auth or int(imap.get("starttls") or 0) > 0 or retry_like or starttls_refused_like > 0
+
+    milestones: list[dict[str, Any]] = []
+    milestones.append({"key": "imap_connect", "ok": imap_connect, "label": "IMAP connection observed"})
+    milestones.append({"key": "imap_activity", "ok": imap_activity, "label": "IMAP activity observed"})
+
+    if str(step.get("scenario")) == "two_phase":
+        activation = bool(summary.get("saw_tls_auth"))
+        post_activation = _guided_detect_post_activation(list(summary.get("events") or []))
+        milestones.append({"key": "activation", "ok": activation, "label": "Successful TLS login observed"})
+        milestones.append({"key": "post_activation", "ok": post_activation, "label": "Follow-up attempt after login observed"})
+
+    milestones.append({"key": "smtp_attempt", "ok": smtp_attempt, "label": "SMTP connection observed"})
+    return milestones
+
+
+def _guided_step_progress(step: dict[str, Any], summary: dict[str, Any], prev: dict[str, bool]) -> tuple[float, Optional[str], dict[str, bool], list[str]]:
+    milestones = _guided_milestones(step, summary)
+    keys = [str(m["key"]) for m in milestones]
+    now_flags: dict[str, bool] = {k: False for k in keys}
+    for m in milestones:
+        now_flags[str(m["key"])] = bool(m.get("ok"))
+
+    total = len(keys)
+    done = sum(1 for k in keys if now_flags.get(k))
+    fill = (done / total) if total else 0.0
+
+    reason: Optional[str] = None
+    for m in milestones:
+        k = str(m["key"])
+        if bool(m.get("ok")) and not bool(prev.get(k)):
+            reason = str(m.get("label") or k)
+
+    missing = [str(m.get("label") or m.get("key")) for m in milestones if not bool(m.get("ok"))]
+    return min(0.99, max(0.0, fill)), reason, now_flags, missing
+
+
+def _guided_set_override(data: dict[str, Any], ip: str, mode: str, scenario: str, session: str, ttl: int = 900) -> int:
+    now = int(time.time())
+    expires = now + int(ttl)
+    overrides = [o for o in data.get("overrides", []) if o.get("ip") != ip]
+    overrides.append({"ip": ip, "mode": mode, "expires": expires, "session": session, "scenario": scenario})
+    data["overrides"] = overrides
+    return expires
+
+
+def _esc_html(s: str) -> str:
+    return (
+        (s or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+
+_COPY_SVG = (
+    "<svg viewBox=\"0 0 24 24\" width=\"16\" height=\"16\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\">"
+    "<path d=\"M8 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"/>"
+    "<path d=\"M6 20h8a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2Z\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"/>"
+    "</svg>"
+)
+
+
+def _copy_button(copy_text: str, title: str = "Copy") -> str:
+    t = _esc_html(copy_text)
+    tt = _esc_html(title)
+    return f"<button type=\"button\" class=\"icon-btn copy-btn\" data-copy=\"{t}\" title=\"{tt}\" aria-label=\"{tt}\">{_COPY_SVG}</button>"
+
+
+def _copy_script() -> str:
+    return """
+<script>
+  (() => {
+    async function copyText(s) {
+      if (!s) return;
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(s);
+          return;
+        }
+      } catch (e) {}
+
+      const ta = document.createElement('textarea');
+      ta.value = s;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      ta.style.top = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch (e) {}
+      ta.remove();
+    }
+
+    document.addEventListener('click', (ev) => {
+      const btn = ev.target && ev.target.closest ? ev.target.closest('.copy-btn') : null;
+      if (!btn) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      copyText(btn.getAttribute('data-copy') || '');
+    });
+  })();
+</script>
+"""
+
+
+def _guided_results_html(run: dict[str, Any]) -> str:
+    steps = list(run.get("steps") or [])
+    rows: list[str] = []
+    rows.append("<tr><th>#</th><th>Scenario</th><th>Testcase</th><th>Verdict</th><th>Findings</th><th>Details</th></tr>")
+    for i, s in enumerate(steps):
+        res = s.get("result") or {}
+        verdict = str(res.get("verdict") or "INCONCLUSIVE")
+
+        pill_class = "pill"
+        if verdict.startswith("PASS"):
+            pill_class += " pill-pass"
+        elif verdict.startswith("FAIL"):
+            pill_class += " pill-fail"
+
+        findings = list(res.get("findings") or [])
+        findings_html = " ".join([f"<span class=\"badge\">{_esc_html(str(f))}</span>" for f in findings])
+        if not findings_html:
+            findings_html = "<span class=\"muted\">(none)</span>"
+
+        detail = res.get("detail") or {}
+        smtp = detail.get("smtp") or {}
+        imap = detail.get("imap") or {}
+
+        session = str(s.get("session") or "")
+        log_link = ""
+        if session:
+            log_link = f"<div class=\"row\" style=\"margin-top: 10px;\"><a class=\"btn btn-small\" href=\"/status?session={_esc_html(session)}\" target=\"_blank\" rel=\"noopener\">View logs</a></div>"
+
+        detail_html = (
+            "<details>"
+            "<summary>Show</summary>"
+            + f"<div class=\"row muted\"><b>IMAP</b> connects={_esc_html(str(imap.get('connects')))} starttls={_esc_html(str(imap.get('starttls_results')))} auth_tls={_esc_html(str(imap.get('auth_tls')))} auth_plain={_esc_html(str(imap.get('auth_plain')))}</div>"
+            + f"<div class=\"row muted\"><b>SMTP</b> connects={_esc_html(str(smtp.get('connects')))} starttls={_esc_html(str(smtp.get('starttls_results')))} auth_tls={_esc_html(str(smtp.get('auth_tls')))} auth_plain={_esc_html(str(smtp.get('auth_plain')))}</div>"
+            + log_link
+            + "</details>"
+        )
+
+        rows.append(
+            "<tr>"
+            + f"<td>{i+1}</td>"
+            + f"<td><code>{_esc_html(str(s.get('scenario') or ''))}</code></td>"
+            + f"<td><code>{_esc_html(str(s.get('mode') or ''))}</code></td>"
+            + f"<td><span class=\"{pill_class}\">{_esc_html(verdict)}</span></td>"
+            + f"<td>{findings_html}</td>"
+            + f"<td>{detail_html}</td>"
+            + "</tr>"
+        )
+
+    headline = "COMPLETED" if run.get("status") == "completed" else "ABORTED"
+    return f"<h2>{headline}</h2><table>" + "".join(rows) + "</table>"
 
 
 _BASE_TEMPLATE: Optional[str] = None
@@ -224,10 +449,38 @@ def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_p
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     @app.get("/", response_class=HTMLResponse)
-    def index(scenario: str = "") -> str:
+    def index(req: Request, scenario: str = "", view: str = "") -> str:
+        view = (view or "").strip().lower()
         scenario = (scenario or "").strip().lower()
         if scenario not in {"", "immediate", "two_phase"}:
             scenario = ""
+
+        if not view and scenario:
+            view = "advanced"
+
+        if view not in {"", "advanced"}:
+            view = ""
+
+        if not view:
+            chooser = f"""
+<h1>Mail Client Self-Test</h1>
+<p class=\"muted\">WebUI host: <code>{hostname}</code></p>
+<p class=\"muted\">Autodetect domain: <code>{autodetect_domain}</code></p>
+
+<div class=\"glass-panel\" style=\"margin-top: 14px;\">\
+  <h2>Choose view</h2>\
+  <div class=\"row muted\">Guided runs the full suite automatically. Advanced lets you select scenario and testcase manually.</div>\
+  <div class=\"grid-2\" style=\"margin-top: 12px;\">\
+    <div class=\"mode-card\">\
+      <a class=\"btn mode-start\" href=\"/guided\">Guided</a>\
+    </div>\
+    <div class=\"mode-card\">\
+      <a class=\"btn mode-start\" href=\"/?view=advanced\">Advanced</a>\
+    </div>\
+  </div>\
+</div>
+"""
+            return _html_page("Self-Test", chooser)
 
         scenario_choice = ""
         if not scenario:
@@ -390,6 +643,247 @@ __MODE_SELECTION__
         )
         return _html_page("Self-Test", body)
 
+    @app.get("/favicon.ico")
+    def favicon() -> Response:
+        return Response(status_code=int(HTTPStatus.NO_CONTENT))
+
+    @app.get("/guided", response_class=HTMLResponse)
+    def guided() -> str:
+        body = """
+<div class="page-header">
+  <h1>Guided Self-Test</h1>
+  <div class="page-actions">
+    <a class="icon-btn" href="/" aria-label="Back" title="Back">←</a>
+  </div>
+</div>
+
+<div class="glass-panel">
+  <div class="row" style="display:flex; justify-content: space-between; gap: 12px; align-items: center;"><b>Progress</b><span class="muted" id="guided-progress-pct">0%</span></div>
+  <div class="progress-wrap"><div id="guided-progress" class="progress-fill" style="width:0%"></div></div>
+  <div class="row muted" id="guided-progress-reason">Last progress: (none yet)</div>
+</div>
+
+<div class="glass-panel" style="margin-top: 12px;" id="guided-step-panel">
+  <div class="row" id="guided-step-title"><b>Loading…</b></div>
+  <div class="row muted" id="guided-step-instructions"></div>
+  <div id="guided-credentials" style="margin-top: 10px;"></div>
+  <div id="guided-manual" style="margin-top: 10px; display:none;"></div>
+  <div class="row" style="margin-top: 12px; display:flex; gap:10px; flex-wrap:wrap;" id="guided-controls">
+    <a class="btn btn-cta btn-success" id="guided-confirm" href="#">I did the steps</a>
+    <a class="btn" id="guided-skip" href="#">Skip anyway</a>
+    <a class="btn btn-danger" id="guided-abort" href="#">Abort</a>
+  </div>
+  <div class="row muted" id="guided-errors" style="margin-top: 10px;"></div>
+</div>
+
+<div class="glass-panel" style="margin-top: 12px; display:none;" id="guided-results"></div>
+
+<script>
+  let runId = null;
+  let pollTimer = null;
+  let lastRender = {
+    status: null,
+    step_index: null,
+    step_label: null,
+    last_progress_reason: null,
+    instructions_html: null,
+    credentials_html: null,
+    show_manual: null,
+    manual_html: null,
+    results_html: null,
+    ready: null,
+    error: null,
+    progress_pct: null,
+  };
+
+  function pct(x) {
+    return Math.max(0, Math.min(100, Math.round((x || 0) * 10000) / 100));
+  }
+
+  async function api(path, method='GET') {
+    const r = await fetch(path, {method});
+    return await r.json();
+  }
+
+  function setDisabled(el, disabled) {
+    if (!el) return;
+    if (disabled) el.classList.add('btn-disabled');
+    else el.classList.remove('btn-disabled');
+  }
+
+  function setTextIfChanged(el, next) {
+    if (!el) return;
+    const cur = el.textContent || '';
+    if (cur !== (next || '')) el.textContent = next || '';
+  }
+
+  function setHtmlIfChanged(el, next) {
+    if (!el) return;
+    const cur = el.innerHTML || '';
+    if (cur !== (next || '')) el.innerHTML = next || '';
+  }
+
+  function render(st) {
+    const prog = document.getElementById('guided-progress');
+    const progPct = document.getElementById('guided-progress-pct');
+    const reason = document.getElementById('guided-progress-reason');
+    const stepPanel = document.getElementById('guided-step-panel');
+    const title = document.getElementById('guided-step-title');
+    const instr = document.getElementById('guided-step-instructions');
+    const creds = document.getElementById('guided-credentials');
+    const manual = document.getElementById('guided-manual');
+    const confirmBtn = document.getElementById('guided-confirm');
+    const skipBtn = document.getElementById('guided-skip');
+    const abortBtn = document.getElementById('guided-abort');
+    const errs = document.getElementById('guided-errors');
+    const results = document.getElementById('guided-results');
+
+    const p = `${pct(st.progress)}%`;
+    if (lastRender.progress_pct !== p) {
+      lastRender.progress_pct = p;
+      prog.style.width = p;
+      setTextIfChanged(progPct, p);
+    }
+
+    if (lastRender.last_progress_reason !== (st.last_progress_reason || null)) {
+      lastRender.last_progress_reason = st.last_progress_reason || null;
+      setTextIfChanged(reason, `Last progress: ${st.last_progress_reason || '(none yet)'}`);
+    }
+
+    if (lastRender.error !== (st.error || null)) {
+      lastRender.error = st.error || null;
+      setTextIfChanged(errs, st.error || '');
+    }
+
+    if (st.status === 'completed' || st.status === 'aborted') {
+      if (stepPanel) stepPanel.style.display = 'none';
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      if (st.results_html && lastRender.results_html !== st.results_html) {
+        lastRender.results_html = st.results_html;
+        results.style.display = 'block';
+        setHtmlIfChanged(results, st.results_html);
+      } else if (st.results_html) {
+        results.style.display = 'block';
+      }
+      return;
+    }
+
+    if (stepPanel) stepPanel.style.display = 'block';
+
+    const nextTitle = `<b>Step ${st.step_index + 1}/9:</b> ${st.step_label || ''}`;
+    if (lastRender.step_index !== st.step_index || lastRender.step_label !== (st.step_label || null)) {
+      lastRender.step_index = st.step_index;
+      lastRender.step_label = st.step_label || null;
+      setHtmlIfChanged(title, nextTitle);
+    }
+
+    if (lastRender.instructions_html !== (st.instructions_html || '')) {
+      lastRender.instructions_html = st.instructions_html || '';
+      setHtmlIfChanged(instr, st.instructions_html || '');
+    }
+
+    if (lastRender.credentials_html !== (st.credentials_html || '')) {
+      lastRender.credentials_html = st.credentials_html || '';
+      setHtmlIfChanged(creds, st.credentials_html || '');
+    }
+
+    if (st.show_manual) {
+      manual.style.display = 'block';
+      if (lastRender.manual_html !== (st.manual_html || '')) {
+        lastRender.manual_html = st.manual_html || '';
+        setHtmlIfChanged(manual, st.manual_html || '');
+      }
+    } else {
+      manual.style.display = 'none';
+      lastRender.manual_html = null;
+    }
+
+    if (lastRender.ready !== !!st.ready) {
+      lastRender.ready = !!st.ready;
+      setDisabled(confirmBtn, !st.ready);
+    }
+  }
+
+  async function poll() {
+    if (!runId) return;
+    const st = await api(`/api/guided/run/${encodeURIComponent(runId)}`);
+    if (!st.ok) {
+      document.getElementById('guided-errors').textContent = st.error || 'poll failed';
+      return;
+    }
+    render(st);
+  }
+
+  async function start() {
+    const r = await api('/api/guided/run/start', 'POST');
+    if (!r.ok) {
+      document.getElementById('guided-errors').textContent = r.error || 'start failed';
+      return;
+    }
+    runId = r.run_id;
+    await poll();
+    pollTimer = setInterval(poll, 1200);
+  }
+
+  document.getElementById('guided-confirm').addEventListener('click', async (ev) => {
+    ev.preventDefault();
+    if (!runId) return;
+    if (ev.target.classList.contains('btn-disabled')) return;
+    const r = await api(`/api/guided/run/${encodeURIComponent(runId)}/confirm`, 'POST');
+    if (!r.ok) document.getElementById('guided-errors').textContent = r.error || 'confirm failed';
+    await poll();
+  });
+
+  document.getElementById('guided-skip').addEventListener('click', async (ev) => {
+    ev.preventDefault();
+    if (!runId) return;
+    if (!confirm('Skip this step anyway?')) return;
+    const r = await api(`/api/guided/run/${encodeURIComponent(runId)}/skip`, 'POST');
+    if (!r.ok) document.getElementById('guided-errors').textContent = r.error || 'skip failed';
+    await poll();
+  });
+
+  document.getElementById('guided-abort').addEventListener('click', async (ev) => {
+    ev.preventDefault();
+    if (!runId) return;
+    if (!confirm('Abort the guided run?')) return;
+    const r = await api(`/api/guided/run/${encodeURIComponent(runId)}/abort`, 'POST');
+    if (!r.ok) document.getElementById('guided-errors').textContent = r.error || 'abort failed';
+    await poll();
+  });
+
+  // Copy-to-clipboard for inline copy buttons
+  document.addEventListener('click', async (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('.copy-btn') : null;
+    if (!btn) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const s = btn.getAttribute('data-copy') || '';
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(s);
+        return;
+      }
+    } catch (e) {}
+    const ta = document.createElement('textarea');
+    ta.value = s;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.top = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    ta.remove();
+  });
+
+  start();
+</script>
+"""
+        return _html_page("Guided", body)
+
     @app.get("/start", response_class=HTMLResponse)
     def start(req: Request, mode: str = "baseline", ttl: int = 900, scenario: str = "immediate") -> str:
         if mode not in {"baseline", "t1", "t2", "t3", "t4"}:
@@ -437,8 +931,8 @@ __MODE_SELECTION__
 <div class="grid-2" style="margin-top: 14px;">
   <div class="glass-panel">
     <h2>Credentials</h2>
-    <div class="row"><b>Email address</b> (autodetect): <code>{email_addr}</code></div>
-    <div class="row"><b>Username</b>: <code>{username}</code></div>
+    <div class="row"><b>Email address</b> (autodetect): <code>{email_addr}</code> {_copy_button(email_addr, 'Copy email')}</div>
+    <div class="row"><b>Username</b>: <code>{username}</code> {_copy_button(username, 'Copy username')}</div>
     <div class="row"><b>Password</b>: <code>test</code> <span class="muted">(any value; not stored)</span></div>
   </div>
 
@@ -467,7 +961,7 @@ __MODE_SELECTION__
   </div>
 
   <div id="setup-autodetect" style="display:none">
-    <div class="row">Enter this email address in your client: <code>{email_addr}</code></div>
+    <div class="row">Enter this email address in your client: <code>{email_addr}</code> {_copy_button(email_addr, 'Copy email')}</div>
     <div class="row muted">The client should discover <code>{imap_host}</code> / <code>{smtp_host}</code>. If it proposes different providers/settings, switch to <b>Manual configuration</b> and use the settings above.</div>
   </div>
 </div>
@@ -526,7 +1020,7 @@ __MODE_SELECTION__
   <div class="row"><a class="btn btn-cta" href="/status?session={session}">Open status page</a></div>
 </div>
 """
-        return _html_page("Session", body)
+        return _html_page("Session", body + _copy_script())
 
     @app.get("/status", response_class=HTMLResponse)
     def status(session: str) -> str:
@@ -539,8 +1033,11 @@ __MODE_SELECTION__
             return f"<tr><th>{label}</th><td>{value}</td></tr>"
 
         rows = []
-        rows.append(_row("Session", f"<code>{session}</code>"))
-        rows.append(_row("Username", f"<code>test-{session}</code>"))
+        username = f"test-{session}"
+        email_addr = f"{username}@{autodetect_domain}"
+        rows.append(_row("Session", f"<code>{session}</code> {_copy_button(session, 'Copy session')}"))
+        rows.append(_row("Username", f"<code>{username}</code> {_copy_button(username, 'Copy username')}"))
+        rows.append(_row("Email", f"<code>{email_addr}</code> {_copy_button(email_addr, 'Copy email')}"))
         rows.append(_row("Events observed", str(len(hits))))
         if last:
             rows.append(_row("Last event", f"<code>{last.get('event')}</code> ({last.get('proto')})"))
@@ -553,10 +1050,13 @@ __MODE_SELECTION__
         verdict = str(summary.get("verdict"))
         if verdict == "FAIL":
             headline = "FAIL (plaintext credentials exposure observed)"
+            verdict_class = "pill pill-fail"
         elif verdict == "PASS":
             headline = "PASS (no plaintext credentials observed; TLS auth seen)"
+            verdict_class = "pill pill-pass"
         else:
             headline = "INCONCLUSIVE (no credentials observed yet)"
+            verdict_class = "pill"
 
         smtp = summary.get("smtp", {})
         imap = summary.get("imap", {})
@@ -564,7 +1064,7 @@ __MODE_SELECTION__
         starttls_refused_like = int(summary.get("starttls_refused_like") or 0)
 
         details = []
-        details.append(f"<div class=\"row\"><b>Verdict</b>: <span class=\"pill\">{headline}</span></div>")
+        details.append(f"<div class=\"row\"><b>Verdict</b>: <span class=\"{verdict_class}\">{headline}</span></div>")
         details.append(
             "<div class=\"row muted\"><b>FAIL</b> only triggers when the service observes an auth/login attempt with <code>tls=false</code>." "</div>"
         )
@@ -629,7 +1129,7 @@ __MODE_SELECTION__
 <script src="/static/toasts.js"></script>
 <script>initToasts({json.dumps(session)});</script>
 """
-        return _html_page("Status", body)
+        return _html_page("Status", body + _copy_script())
 
     @app.get("/api/health")
     def api_health() -> dict[str, Any]:
@@ -685,6 +1185,298 @@ __MODE_SELECTION__
         events = _read_events(events_path)
         summary = _summarize_session(events, session)
         return JSONResponse({"ok": True, "session": session, "verdict": summary.get("verdict"), "summary": {"smtp": summary.get("smtp"), "imap": summary.get("imap"), "retry_like": summary.get("retry_like"), "starttls_refused_like": summary.get("starttls_refused_like"), "saw_plain": summary.get("saw_plain"), "saw_tls_auth": summary.get("saw_tls_auth")}, "events": summary.get("events", [])[-200:]})
+
+    def _guided_get_run(data: dict[str, Any], run_id: str) -> Optional[dict[str, Any]]:
+        data.setdefault("guided_runs", {})
+        run = data["guided_runs"].get(run_id)
+        if not isinstance(run, dict):
+            return None
+        return run
+
+    def _guided_current_step(run: dict[str, Any]) -> Optional[dict[str, Any]]:
+        idx = int(run.get("step_index") or 0)
+        steps = list(run.get("steps") or [])
+        if idx < 0 or idx >= len(steps):
+            return None
+        step = steps[idx]
+        if not isinstance(step, dict):
+            return None
+        return step
+
+    def _guided_step_credentials_html(session: str) -> str:
+        username = f"test-{session}"
+        email_addr = f"{username}@{autodetect_domain}"
+        return (
+            "<div class=\"glass-panel\">"
+            "<h2>Credentials</h2>"
+            + f"<div class=\"row\"><b>Email</b> (autodetect): <code>{_esc_html(email_addr)}</code> {_copy_button(email_addr, 'Copy email')}</div>"
+            + f"<div class=\"row\"><b>Username</b>: <code>{_esc_html(username)}</code> {_copy_button(username, 'Copy username')}</div>"
+            + "<div class=\"row\"><b>Password</b>: <code>test</code></div>"
+            "</div>"
+        )
+
+    def _guided_manual_html() -> str:
+        return (
+            "<div class=\"glass-panel\">"
+            "<h2>Manual settings</h2>"
+            + f"<div class=\"row\"><b>IMAP</b>: host <code>{_esc_html(hostname)}</code>, port <code>143</code>, security <b>STARTTLS</b></div>"
+            + f"<div class=\"row\"><b>SMTP</b>: host <code>{_esc_html(hostname)}</code>, port <code>587</code>, security <b>STARTTLS</b></div>"
+            + "<div class=\"row muted\">SMTP is required: please attempt to send a test mail in every step.</div>"
+            "</div>"
+        )
+
+    def _guided_instructions_html(step: dict[str, Any]) -> str:
+        scenario = str(step.get("scenario") or "")
+        mode = str(step.get("mode") or "")
+        base = "<div class=\"row\">1) Add this account via autodetect (enter the email above).</div>"
+        base += "<div class=\"row\">2) Try to login / refresh inbox.</div>"
+        base += "<div class=\"row\">3) Try to send a test mail (SMTP attempt is required).</div>"
+        if scenario == "two_phase":
+            base += "<div class=\"row muted\">Two-phase: first login should succeed; then trigger another refresh/send so the disruption happens after activation.</div>"
+        if mode == "baseline":
+            base += "<div class=\"row muted\">Baseline sanity check: should normally login over STARTTLS and not expose plaintext credentials.</div>"
+        else:
+            base += "<div class=\"row muted\">Do not accept insecure downgrade prompts (e.g., \"No encryption\").</div>"
+        return base
+
+    @app.post("/api/guided/run/start")
+    def api_guided_start(req: Request) -> JSONResponse:
+        ip = _client_ip(req)
+        run_id = _guided_new_run_id()
+        steps = _guided_steps()
+
+        data = _load_store(store_path)
+        _prune_overrides(data)
+        data.setdefault("guided_runs", {})
+
+        step0 = dict(steps[0])
+        session0 = _new_session_code()
+        step0["session"] = session0
+        step0["created_ts"] = int(time.time())
+        step0["milestones"] = {}
+        step0["step_progress"] = 0.0
+        step0["last_progress_reason"] = None
+
+        expires0 = _guided_set_override(data, ip, str(step0["mode"]), str(step0["scenario"]), session0, ttl=900)
+        step0["expires"] = expires0
+
+        run = {
+            "run_id": run_id,
+            "ip": ip,
+            "created_ts": int(time.time()),
+            "status": "running",
+            "step_index": 0,
+            "steps": [step0] + [dict(s) for s in steps[1:]],
+            "last_progress_reason": None,
+            "last_progress": 0.0,
+        }
+        data["guided_runs"][run_id] = run
+        _save_store(store_path, data)
+        return JSONResponse({"ok": True, "run_id": run_id})
+
+    def _guided_finish_step(step: dict[str, Any], summary: dict[str, Any], forced_verdict: Optional[str] = None) -> None:
+        verdict = str(forced_verdict or summary.get("verdict") or "INCONCLUSIVE")
+        step["result"] = {
+            "verdict": verdict,
+            "findings": _guided_findings(summary),
+            "detail": {
+                "smtp": summary.get("smtp"),
+                "imap": summary.get("imap"),
+                "retry_like": summary.get("retry_like"),
+                "starttls_refused_like": summary.get("starttls_refused_like"),
+            },
+        }
+        step["finished_ts"] = int(time.time())
+
+    def _guided_advance_run(data: dict[str, Any], run: dict[str, Any]) -> None:
+        ip = str(run.get("ip") or "")
+        steps = list(run.get("steps") or [])
+        idx = int(run.get("step_index") or 0)
+        idx += 1
+        run["step_index"] = idx
+        if idx >= len(steps):
+            run["status"] = "completed"
+            run["last_progress"] = 1.0
+            run["last_progress_reason"] = "Completed"
+            data["overrides"] = [o for o in data.get("overrides", []) if o.get("ip") != ip]
+            return
+
+        step = steps[idx]
+        if not isinstance(step, dict):
+            step = {}
+            steps[idx] = step
+        session = _new_session_code()
+        step["session"] = session
+        step["created_ts"] = int(time.time())
+        step["milestones"] = {}
+        step["step_progress"] = 0.0
+        step["last_progress_reason"] = None
+
+        expires = _guided_set_override(data, ip, str(step.get("mode") or "baseline"), str(step.get("scenario") or "immediate"), session, ttl=900)
+        step["expires"] = expires
+        run["steps"] = steps
+
+    def _guided_state_response(data: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
+        status = str(run.get("status") or "running")
+        if status in {"completed", "aborted"}:
+            return {
+                "ok": True,
+                "status": status,
+                "progress": float(run.get("last_progress") or 0.0),
+                "last_progress_reason": run.get("last_progress_reason"),
+                "step_index": int(run.get("step_index") or 0),
+                "results_html": _guided_results_html(run),
+            }
+
+        step = _guided_current_step(run)
+        if step is None:
+            return {"ok": False, "error": "invalid step"}
+        session = str(step.get("session") or "")
+        if not session:
+            return {"ok": False, "error": "missing session"}
+
+        events = _read_events(events_path)
+        summary = _summarize_session(events, session)
+
+        prev = dict(step.get("milestones") or {})
+        fill, reason, flags, missing = _guided_step_progress(step, summary, prev)
+        if reason is not None:
+            step["last_progress_reason"] = reason
+            run["last_progress_reason"] = reason
+        step["milestones"] = flags
+        step["step_progress"] = float(fill)
+
+        idx = int(run.get("step_index") or 0)
+        completed = idx
+        overall = (completed / 9.0) + (float(fill) / 9.0)
+        run["last_progress"] = float(overall)
+
+        age = int(time.time()) - int(step.get("created_ts") or int(time.time()))
+        total_connects = int(summary.get("imap", {}).get("connects") or 0) + int(summary.get("smtp", {}).get("connects") or 0)
+        show_manual = total_connects <= 0 and age >= 25
+
+        ready = all(bool(v) for v in flags.values()) if flags else False
+
+        mode = str(step.get("mode") or "")
+        scenario = str(step.get("scenario") or "")
+        step_label = str(step.get("label") or "")
+
+        resp: dict[str, Any] = {
+            "ok": True,
+            "status": status,
+            "step_index": idx,
+            "step_label": step_label,
+            "scenario": scenario,
+            "mode": mode,
+            "progress": float(overall),
+            "last_progress_reason": run.get("last_progress_reason"),
+            "ready": bool(ready),
+            "missing": missing,
+            "instructions_html": _guided_instructions_html(step),
+            "credentials_html": _guided_step_credentials_html(session),
+            "show_manual": bool(show_manual),
+            "manual_html": _guided_manual_html() if show_manual else "",
+        }
+
+        data.setdefault("guided_runs", {})
+        data["guided_runs"][str(run.get("run_id"))] = run
+        _save_store(store_path, data)
+        return resp
+
+    @app.get("/api/guided/run/{run_id}")
+    def api_guided_get(req: Request, run_id: str) -> JSONResponse:
+        ip = _client_ip(req)
+        data = _load_store(store_path)
+        run = _guided_get_run(data, run_id)
+        if run is None:
+            return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
+        if str(run.get("ip")) != ip:
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
+        resp = _guided_state_response(data, run)
+        if not resp.get("ok"):
+            return JSONResponse(resp, status_code=int(HTTPStatus.BAD_REQUEST))
+        return JSONResponse(resp)
+
+    @app.post("/api/guided/run/{run_id}/confirm")
+    def api_guided_confirm(req: Request, run_id: str) -> JSONResponse:
+        ip = _client_ip(req)
+        data = _load_store(store_path)
+        run = _guided_get_run(data, run_id)
+        if run is None:
+            return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
+        if str(run.get("ip")) != ip:
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
+        if str(run.get("status")) != "running":
+            return JSONResponse({"ok": False, "error": "not running"}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        step = _guided_current_step(run)
+        if step is None:
+            return JSONResponse({"ok": False, "error": "invalid step"}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        session = str(step.get("session") or "")
+        events = _read_events(events_path)
+        summary = _summarize_session(events, session)
+        prev = dict(step.get("milestones") or {})
+        fill, _, flags, missing = _guided_step_progress(step, summary, prev)
+        step["milestones"] = flags
+        step["step_progress"] = float(fill)
+        ready = all(bool(v) for v in flags.values()) if flags else False
+        if not ready:
+            return JSONResponse({"ok": False, "error": "not ready", "missing": missing}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        _guided_finish_step(step, summary)
+        _guided_advance_run(data, run)
+        data.setdefault("guided_runs", {})
+        data["guided_runs"][run_id] = run
+        _save_store(store_path, data)
+        return JSONResponse({"ok": True})
+
+    @app.post("/api/guided/run/{run_id}/skip")
+    def api_guided_skip(req: Request, run_id: str) -> JSONResponse:
+        ip = _client_ip(req)
+        data = _load_store(store_path)
+        run = _guided_get_run(data, run_id)
+        if run is None:
+            return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
+        if str(run.get("ip")) != ip:
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
+        if str(run.get("status")) != "running":
+            return JSONResponse({"ok": False, "error": "not running"}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        step = _guided_current_step(run)
+        if step is None:
+            return JSONResponse({"ok": False, "error": "invalid step"}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        session = str(step.get("session") or "")
+        events = _read_events(events_path)
+        summary = _summarize_session(events, session)
+        _guided_finish_step(step, summary, forced_verdict="SKIPPED")
+        _guided_advance_run(data, run)
+        data.setdefault("guided_runs", {})
+        data["guided_runs"][run_id] = run
+        _save_store(store_path, data)
+        return JSONResponse({"ok": True})
+
+    @app.post("/api/guided/run/{run_id}/abort")
+    def api_guided_abort(req: Request, run_id: str) -> JSONResponse:
+        ip = _client_ip(req)
+        data = _load_store(store_path)
+        run = _guided_get_run(data, run_id)
+        if run is None:
+            return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
+        if str(run.get("ip")) != ip:
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
+        if str(run.get("status")) not in {"running", "aborted"}:
+            return JSONResponse({"ok": False, "error": "cannot abort"}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        run["status"] = "aborted"
+        run["aborted_ts"] = int(time.time())
+        data["overrides"] = [o for o in data.get("overrides", []) if o.get("ip") != ip]
+        run["last_progress"] = float(run.get("last_progress") or 0.0)
+        data.setdefault("guided_runs", {})
+        data["guided_runs"][run_id] = run
+        _save_store(store_path, data)
+        return JSONResponse({"ok": True})
 
     @app.exception_handler(Exception)
     def _err(_: Request, exc: Exception) -> JSONResponse:
