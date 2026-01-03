@@ -66,13 +66,30 @@ def _smtp_username_from_auth_plain(initial_response_b64: bytes) -> Optional[str]
 def _load_mode_store(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"default_mode": "baseline", "overrides": []}
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(raw.lstrip())
+            if isinstance(obj, dict):
+                if "default_mode" not in obj:
+                    obj["default_mode"] = "baseline"
+                if "overrides" not in obj:
+                    obj["overrides"] = []
+                _save_mode_store(path, obj)
+                return obj
+        except Exception:
+            pass
+        fallback: dict[str, Any] = {"default_mode": "baseline", "overrides": []}
+        _save_mode_store(path, fallback)
+        return fallback
 
 
 def _save_mode_store(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{secrets.token_hex(6)}.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f)
     os.replace(tmp, path)

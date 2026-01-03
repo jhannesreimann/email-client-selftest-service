@@ -11,20 +11,35 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 
 def _load_store(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"default_mode": "baseline", "overrides": [], "guided_runs": {}}
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(raw.lstrip())
+            if isinstance(obj, dict):
+                if "guided_runs" not in obj:
+                    obj["guided_runs"] = {}
+                _save_store(path, obj)
+                return obj
+        except Exception:
+            pass
+        fallback: dict[str, Any] = {"default_mode": "baseline", "overrides": [], "guided_runs": {}}
+        _save_store(path, fallback)
+        return fallback
 
 
 def _save_store(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{secrets.token_hex(6)}.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f)
     os.replace(tmp, path)
@@ -166,6 +181,56 @@ def _esc_html(s: str) -> str:
     )
 
 
+_COPY_SVG = (
+    "<svg viewBox=\"0 0 24 24\" width=\"16\" height=\"16\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\">"
+    "<path d=\"M8 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"/>"
+    "<path d=\"M6 20h8a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2Z\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"/>"
+    "</svg>"
+)
+
+
+def _copy_button(copy_text: str, title: str = "Copy") -> str:
+    t = _esc_html(copy_text)
+    tt = _esc_html(title)
+    return f"<button type=\"button\" class=\"icon-btn copy-btn\" data-copy=\"{t}\" title=\"{tt}\" aria-label=\"{tt}\">{_COPY_SVG}</button>"
+
+
+def _copy_script() -> str:
+    return """
+<script>
+  (() => {
+    async function copyText(s) {
+      if (!s) return;
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(s);
+          return;
+        }
+      } catch (e) {}
+
+      const ta = document.createElement('textarea');
+      ta.value = s;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      ta.style.top = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch (e) {}
+      ta.remove();
+    }
+
+    document.addEventListener('click', (ev) => {
+      const btn = ev.target && ev.target.closest ? ev.target.closest('.copy-btn') : null;
+      if (!btn) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      copyText(btn.getAttribute('data-copy') || '');
+    });
+  })();
+</script>
+"""
+
+
 def _guided_results_html(run: dict[str, Any]) -> str:
     steps = list(run.get("steps") or [])
     rows: list[str] = []
@@ -173,6 +238,13 @@ def _guided_results_html(run: dict[str, Any]) -> str:
     for i, s in enumerate(steps):
         res = s.get("result") or {}
         verdict = str(res.get("verdict") or "INCONCLUSIVE")
+
+        pill_class = "pill"
+        if verdict.startswith("PASS"):
+            pill_class += " pill-pass"
+        elif verdict.startswith("FAIL"):
+            pill_class += " pill-fail"
+
         findings = list(res.get("findings") or [])
         findings_html = " ".join([f"<span class=\"badge\">{_esc_html(str(f))}</span>" for f in findings])
         if not findings_html:
@@ -181,12 +253,19 @@ def _guided_results_html(run: dict[str, Any]) -> str:
         detail = res.get("detail") or {}
         smtp = detail.get("smtp") or {}
         imap = detail.get("imap") or {}
+
+        session = str(s.get("session") or "")
+        log_link = ""
+        if session:
+            log_link = f"<div class=\"row\" style=\"margin-top: 10px;\"><a class=\"btn btn-small\" href=\"/status?session={_esc_html(session)}\" target=\"_blank\" rel=\"noopener\">View logs</a></div>"
+
         detail_html = (
             "<details>"
             "<summary>Show</summary>"
             + f"<div class=\"row muted\"><b>IMAP</b> connects={_esc_html(str(imap.get('connects')))} starttls={_esc_html(str(imap.get('starttls_results')))} auth_tls={_esc_html(str(imap.get('auth_tls')))} auth_plain={_esc_html(str(imap.get('auth_plain')))}</div>"
             + f"<div class=\"row muted\"><b>SMTP</b> connects={_esc_html(str(smtp.get('connects')))} starttls={_esc_html(str(smtp.get('starttls_results')))} auth_tls={_esc_html(str(smtp.get('auth_tls')))} auth_plain={_esc_html(str(smtp.get('auth_plain')))}</div>"
-            "</details>"
+            + log_link
+            + "</details>"
         )
 
         rows.append(
@@ -194,7 +273,7 @@ def _guided_results_html(run: dict[str, Any]) -> str:
             + f"<td>{i+1}</td>"
             + f"<td><code>{_esc_html(str(s.get('scenario') or ''))}</code></td>"
             + f"<td><code>{_esc_html(str(s.get('mode') or ''))}</code></td>"
-            + f"<td><span class=\"pill\">{_esc_html(verdict)}</span></td>"
+            + f"<td><span class=\"{pill_class}\">{_esc_html(verdict)}</span></td>"
             + f"<td>{findings_html}</td>"
             + f"<td>{detail_html}</td>"
             + "</tr>"
@@ -370,7 +449,7 @@ def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_p
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     @app.get("/", response_class=HTMLResponse)
-    def index(view: str = "", scenario: str = "") -> str:
+    def index(req: Request, scenario: str = "", view: str = "") -> str:
         view = (view or "").strip().lower()
         scenario = (scenario or "").strip().lower()
         if scenario not in {"", "immediate", "two_phase"}:
@@ -564,6 +643,10 @@ __MODE_SELECTION__
         )
         return _html_page("Self-Test", body)
 
+    @app.get("/favicon.ico")
+    def favicon() -> Response:
+        return Response(status_code=int(HTTPStatus.NO_CONTENT))
+
     @app.get("/guided", response_class=HTMLResponse)
     def guided() -> str:
         body = """
@@ -575,20 +658,20 @@ __MODE_SELECTION__
 </div>
 
 <div class="glass-panel">
-  <div class="row"><b>Progress</b></div>
+  <div class="row" style="display:flex; justify-content: space-between; gap: 12px; align-items: center;"><b>Progress</b><span class="muted" id="guided-progress-pct">0%</span></div>
   <div class="progress-wrap"><div id="guided-progress" class="progress-fill" style="width:0%"></div></div>
   <div class="row muted" id="guided-progress-reason">Last progress: (none yet)</div>
 </div>
 
-<div class="glass-panel" style="margin-top: 12px;">
+<div class="glass-panel" style="margin-top: 12px;" id="guided-step-panel">
   <div class="row" id="guided-step-title"><b>Loading…</b></div>
   <div class="row muted" id="guided-step-instructions"></div>
   <div id="guided-credentials" style="margin-top: 10px;"></div>
   <div id="guided-manual" style="margin-top: 10px; display:none;"></div>
-  <div class="row" style="margin-top: 12px; display:flex; gap:10px; flex-wrap:wrap;">
-    <a class="btn btn-cta" id="guided-confirm" href="#">I did the steps</a>
+  <div class="row" style="margin-top: 12px; display:flex; gap:10px; flex-wrap:wrap;" id="guided-controls">
+    <a class="btn btn-cta btn-success" id="guided-confirm" href="#">I did the steps</a>
     <a class="btn" id="guided-skip" href="#">Skip anyway</a>
-    <a class="btn" id="guided-abort" href="#">Abort</a>
+    <a class="btn btn-danger" id="guided-abort" href="#">Abort</a>
   </div>
   <div class="row muted" id="guided-errors" style="margin-top: 10px;"></div>
 </div>
@@ -597,6 +680,21 @@ __MODE_SELECTION__
 
 <script>
   let runId = null;
+  let pollTimer = null;
+  let lastRender = {
+    status: null,
+    step_index: null,
+    step_label: null,
+    last_progress_reason: null,
+    instructions_html: null,
+    credentials_html: null,
+    show_manual: null,
+    manual_html: null,
+    results_html: null,
+    ready: null,
+    error: null,
+    progress_pct: null,
+  };
 
   function pct(x) {
     return Math.max(0, Math.min(100, Math.round((x || 0) * 10000) / 100));
@@ -613,9 +711,23 @@ __MODE_SELECTION__
     else el.classList.remove('btn-disabled');
   }
 
+  function setTextIfChanged(el, next) {
+    if (!el) return;
+    const cur = el.textContent || '';
+    if (cur !== (next || '')) el.textContent = next || '';
+  }
+
+  function setHtmlIfChanged(el, next) {
+    if (!el) return;
+    const cur = el.innerHTML || '';
+    if (cur !== (next || '')) el.innerHTML = next || '';
+  }
+
   function render(st) {
     const prog = document.getElementById('guided-progress');
+    const progPct = document.getElementById('guided-progress-pct');
     const reason = document.getElementById('guided-progress-reason');
+    const stepPanel = document.getElementById('guided-step-panel');
     const title = document.getElementById('guided-step-title');
     const instr = document.getElementById('guided-step-instructions');
     const creds = document.getElementById('guided-credentials');
@@ -626,35 +738,73 @@ __MODE_SELECTION__
     const errs = document.getElementById('guided-errors');
     const results = document.getElementById('guided-results');
 
-    prog.style.width = `${pct(st.progress)}%`;
-    reason.textContent = `Last progress: ${st.last_progress_reason || '(none yet)'}`;
-    errs.textContent = st.error || '';
+    const p = `${pct(st.progress)}%`;
+    if (lastRender.progress_pct !== p) {
+      lastRender.progress_pct = p;
+      prog.style.width = p;
+      setTextIfChanged(progPct, p);
+    }
+
+    if (lastRender.last_progress_reason !== (st.last_progress_reason || null)) {
+      lastRender.last_progress_reason = st.last_progress_reason || null;
+      setTextIfChanged(reason, `Last progress: ${st.last_progress_reason || '(none yet)'}`);
+    }
+
+    if (lastRender.error !== (st.error || null)) {
+      lastRender.error = st.error || null;
+      setTextIfChanged(errs, st.error || '');
+    }
 
     if (st.status === 'completed' || st.status === 'aborted') {
-      title.innerHTML = `<b>${(st.status || '').toUpperCase()}</b>`;
-      instr.textContent = '';
-      creds.innerHTML = '';
-      manual.style.display = 'none';
-      setDisabled(confirmBtn, true);
-      setDisabled(skipBtn, true);
-      setDisabled(abortBtn, true);
-      if (st.results_html) {
+      if (stepPanel) stepPanel.style.display = 'none';
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      if (st.results_html && lastRender.results_html !== st.results_html) {
+        lastRender.results_html = st.results_html;
         results.style.display = 'block';
-        results.innerHTML = st.results_html;
+        setHtmlIfChanged(results, st.results_html);
+      } else if (st.results_html) {
+        results.style.display = 'block';
       }
       return;
     }
 
-    title.innerHTML = `<b>Step ${st.step_index + 1}/9:</b> ${st.step_label || ''}`;
-    instr.innerHTML = st.instructions_html || '';
-    creds.innerHTML = st.credentials_html || '';
+    if (stepPanel) stepPanel.style.display = 'block';
+
+    const nextTitle = `<b>Step ${st.step_index + 1}/9:</b> ${st.step_label || ''}`;
+    if (lastRender.step_index !== st.step_index || lastRender.step_label !== (st.step_label || null)) {
+      lastRender.step_index = st.step_index;
+      lastRender.step_label = st.step_label || null;
+      setHtmlIfChanged(title, nextTitle);
+    }
+
+    if (lastRender.instructions_html !== (st.instructions_html || '')) {
+      lastRender.instructions_html = st.instructions_html || '';
+      setHtmlIfChanged(instr, st.instructions_html || '');
+    }
+
+    if (lastRender.credentials_html !== (st.credentials_html || '')) {
+      lastRender.credentials_html = st.credentials_html || '';
+      setHtmlIfChanged(creds, st.credentials_html || '');
+    }
+
     if (st.show_manual) {
       manual.style.display = 'block';
-      manual.innerHTML = st.manual_html || '';
+      if (lastRender.manual_html !== (st.manual_html || '')) {
+        lastRender.manual_html = st.manual_html || '';
+        setHtmlIfChanged(manual, st.manual_html || '');
+      }
     } else {
       manual.style.display = 'none';
+      lastRender.manual_html = null;
     }
-    setDisabled(confirmBtn, !st.ready);
+
+    if (lastRender.ready !== !!st.ready) {
+      lastRender.ready = !!st.ready;
+      setDisabled(confirmBtn, !st.ready);
+    }
   }
 
   async function poll() {
@@ -675,7 +825,7 @@ __MODE_SELECTION__
     }
     runId = r.run_id;
     await poll();
-    setInterval(poll, 1200);
+    pollTimer = setInterval(poll, 1200);
   }
 
   document.getElementById('guided-confirm').addEventListener('click', async (ev) => {
@@ -703,6 +853,30 @@ __MODE_SELECTION__
     const r = await api(`/api/guided/run/${encodeURIComponent(runId)}/abort`, 'POST');
     if (!r.ok) document.getElementById('guided-errors').textContent = r.error || 'abort failed';
     await poll();
+  });
+
+  // Copy-to-clipboard for inline copy buttons
+  document.addEventListener('click', async (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('.copy-btn') : null;
+    if (!btn) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const s = btn.getAttribute('data-copy') || '';
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(s);
+        return;
+      }
+    } catch (e) {}
+    const ta = document.createElement('textarea');
+    ta.value = s;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.top = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    ta.remove();
   });
 
   start();
@@ -757,8 +931,8 @@ __MODE_SELECTION__
 <div class="grid-2" style="margin-top: 14px;">
   <div class="glass-panel">
     <h2>Credentials</h2>
-    <div class="row"><b>Email address</b> (autodetect): <code>{email_addr}</code></div>
-    <div class="row"><b>Username</b>: <code>{username}</code></div>
+    <div class="row"><b>Email address</b> (autodetect): <code>{email_addr}</code> {_copy_button(email_addr, 'Copy email')}</div>
+    <div class="row"><b>Username</b>: <code>{username}</code> {_copy_button(username, 'Copy username')}</div>
     <div class="row"><b>Password</b>: <code>test</code> <span class="muted">(any value; not stored)</span></div>
   </div>
 
@@ -787,7 +961,7 @@ __MODE_SELECTION__
   </div>
 
   <div id="setup-autodetect" style="display:none">
-    <div class="row">Enter this email address in your client: <code>{email_addr}</code></div>
+    <div class="row">Enter this email address in your client: <code>{email_addr}</code> {_copy_button(email_addr, 'Copy email')}</div>
     <div class="row muted">The client should discover <code>{imap_host}</code> / <code>{smtp_host}</code>. If it proposes different providers/settings, switch to <b>Manual configuration</b> and use the settings above.</div>
   </div>
 </div>
@@ -846,7 +1020,7 @@ __MODE_SELECTION__
   <div class="row"><a class="btn btn-cta" href="/status?session={session}">Open status page</a></div>
 </div>
 """
-        return _html_page("Session", body)
+        return _html_page("Session", body + _copy_script())
 
     @app.get("/status", response_class=HTMLResponse)
     def status(session: str) -> str:
@@ -859,8 +1033,11 @@ __MODE_SELECTION__
             return f"<tr><th>{label}</th><td>{value}</td></tr>"
 
         rows = []
-        rows.append(_row("Session", f"<code>{session}</code>"))
-        rows.append(_row("Username", f"<code>test-{session}</code>"))
+        username = f"test-{session}"
+        email_addr = f"{username}@{autodetect_domain}"
+        rows.append(_row("Session", f"<code>{session}</code> {_copy_button(session, 'Copy session')}"))
+        rows.append(_row("Username", f"<code>{username}</code> {_copy_button(username, 'Copy username')}"))
+        rows.append(_row("Email", f"<code>{email_addr}</code> {_copy_button(email_addr, 'Copy email')}"))
         rows.append(_row("Events observed", str(len(hits))))
         if last:
             rows.append(_row("Last event", f"<code>{last.get('event')}</code> ({last.get('proto')})"))
@@ -873,10 +1050,13 @@ __MODE_SELECTION__
         verdict = str(summary.get("verdict"))
         if verdict == "FAIL":
             headline = "FAIL (plaintext credentials exposure observed)"
+            verdict_class = "pill pill-fail"
         elif verdict == "PASS":
             headline = "PASS (no plaintext credentials observed; TLS auth seen)"
+            verdict_class = "pill pill-pass"
         else:
             headline = "INCONCLUSIVE (no credentials observed yet)"
+            verdict_class = "pill"
 
         smtp = summary.get("smtp", {})
         imap = summary.get("imap", {})
@@ -884,7 +1064,7 @@ __MODE_SELECTION__
         starttls_refused_like = int(summary.get("starttls_refused_like") or 0)
 
         details = []
-        details.append(f"<div class=\"row\"><b>Verdict</b>: <span class=\"pill\">{headline}</span></div>")
+        details.append(f"<div class=\"row\"><b>Verdict</b>: <span class=\"{verdict_class}\">{headline}</span></div>")
         details.append(
             "<div class=\"row muted\"><b>FAIL</b> only triggers when the service observes an auth/login attempt with <code>tls=false</code>." "</div>"
         )
@@ -949,7 +1129,7 @@ __MODE_SELECTION__
 <script src="/static/toasts.js"></script>
 <script>initToasts({json.dumps(session)});</script>
 """
-        return _html_page("Status", body)
+        return _html_page("Status", body + _copy_script())
 
     @app.get("/api/health")
     def api_health() -> dict[str, Any]:
@@ -1029,8 +1209,8 @@ __MODE_SELECTION__
         return (
             "<div class=\"glass-panel\">"
             "<h2>Credentials</h2>"
-            + f"<div class=\"row\"><b>Email</b> (autodetect): <code>{_esc_html(email_addr)}</code></div>"
-            + f"<div class=\"row\"><b>Username</b>: <code>{_esc_html(username)}</code></div>"
+            + f"<div class=\"row\"><b>Email</b> (autodetect): <code>{_esc_html(email_addr)}</code> {_copy_button(email_addr, 'Copy email')}</div>"
+            + f"<div class=\"row\"><b>Username</b>: <code>{_esc_html(username)}</code> {_copy_button(username, 'Copy username')}</div>"
             + "<div class=\"row\"><b>Password</b>: <code>test</code></div>"
             "</div>"
         )
@@ -1116,6 +1296,8 @@ __MODE_SELECTION__
         run["step_index"] = idx
         if idx >= len(steps):
             run["status"] = "completed"
+            run["last_progress"] = 1.0
+            run["last_progress_reason"] = "Completed"
             data["overrides"] = [o for o in data.get("overrides", []) if o.get("ip") != ip]
             return
 
@@ -1268,7 +1450,7 @@ __MODE_SELECTION__
         session = str(step.get("session") or "")
         events = _read_events(events_path)
         summary = _summarize_session(events, session)
-        _guided_finish_step(step, summary, forced_verdict="INCONCLUSIVE")
+        _guided_finish_step(step, summary, forced_verdict="SKIPPED")
         _guided_advance_run(data, run)
         data.setdefault("guided_runs", {})
         data["guided_runs"][run_id] = run
