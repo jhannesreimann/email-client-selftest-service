@@ -18,6 +18,11 @@ The current implementation is a **public, client-facing self-test**:
 - The user configures a mail client to connect to the selftest host and performs actions (IMAP refresh / SMTP send).
 - The mail server logs privacy-safe events (no passwords) and includes a session code derived from the username (`test-SESSION`).
 
+The WebUI supports two workflows:
+
+- **Guided mode (recommended)**: a fixed 9-step sequence (Baseline, Immediate T1–T4, Two-phase T1–T4) with per-step credentials and a final result table.
+- **Advanced mode**: manually pick a scenario and testcase.
+
 Implementation details that matter for interpretation:
 
 - The mode override is stored per public IP and appears in logs as `override_session` (when present).
@@ -27,6 +32,13 @@ Implementation details that matter for interpretation:
 This setup is designed to answer:
 
 - “Does this client ever attempt **authentication without TLS** when STARTTLS is disrupted or unavailable?”
+
+Outcome computation (current behavior):
+
+- `FAIL` if an auth/login attempt was observed with `tls=false` (plaintext credentials exposure).
+- `PASS` if a TLS-protected auth/login attempt was observed and no plaintext auth was seen.
+- `INCONCLUSIVE` if no auth/login attempt was observed (client aborted early, got stuck retrying, or never reached auth).
+- `SKIPPED` for guided steps that were explicitly skipped in the UI.
 
 ---
 
@@ -86,6 +98,12 @@ Server simulation has the advantage that:
 - it works with “just configure the account”,
 - it does not require additional software,
 - it is deployable on a public host with standard ports.
+
+In addition, the guided workflow improves reproducibility:
+
+- per-step credentials reduce cross-contamination between modes,
+- the user is prompted when to trigger actions (IMAP refresh / SMTP send),
+- the service can compute comparable outcomes across clients.
 
 ### 3.2 Scientific reason: isolate the client decision point
 
@@ -187,18 +205,16 @@ If POP3 coverage is needed later, it can be added as an extension once the SMTP/
 
 Below is a concrete roadmap grouped by impact.
 
-### 6.1 Outcome definitions and result computation (high impact)
+### 6.1 Multi-client testing and comparison to the paper (high impact)
 
-Right now, you can observe events, but for paper-like evaluation you want the WebUI to compute clear outcomes.
+The most important next step is to run the guided workflow across multiple clients/platforms and compare observed outcomes to the paper.
 
-Add explicit per-session/per-protocol outcomes:
+Suggested evaluation dimensions:
 
-- Whether the client attempted **AUTH/LOGIN with `tls=false`**.
-- Whether the client attempted STARTTLS.
-- Whether the client retried on other ports (e.g., fallback to port 25 or implicit TLS).
-- Whether behavior differs between IMAP vs SMTP.
-
-This turns raw logs into “paper-like” result tables.
+- Client UI prompts (downgrade suggestions) vs wire-observed behavior.
+- Differences between IMAP vs SMTP behavior.
+- Differences between `immediate` vs `two_phase` semantics.
+- Frequency of “never reaches auth” cases and what protocol stage clients stop at.
 
 ### 6.2 Mode fidelity alignment to T1–T4 (high impact)
 
@@ -222,6 +238,11 @@ Ensure the simulated modes match the paper’s decision points precisely.
 - **T4**
   - After successful TLS handshake, disrupt the TLS session.
   - In the current implementation, “disrupt” means: after the STARTTLS handshake succeeds, inject unexpected data (e.g., `NOOP`) on the TLS channel and then close.
+
+Two-phase semantics (current behavior):
+
+- For `two_phase`, the service treats the testcase as “activated” only after a TLS-protected authentication attempt was observed.
+- The guided workflow then instructs the user to retry to observe post-activation behavior.
 
 ### 6.3 Protocol realism to trigger client behavior (medium/high)
 
@@ -278,6 +299,8 @@ To reduce cross-user interference:
 - Move from “mode per IP” to “mode per session token” (or IP+session).
 - Or pin the mode to a session code extracted from the username.
 
+In the current guided workflow, this risk is reduced by using fresh credentials per step, but public NAT/shared-IP environments can still cause interference.
+
 ### 6.5 Add a lab-only MITM tool (optional, for maximum parity)
 
 If you need strict T2 parity and true MITM semantics:
@@ -299,9 +322,9 @@ If required for completeness:
 
 If the goal is “as close as practical to the paper, for a public self-test”:
 
-1) **Define outcomes** and have the WebUI compute a clear result per protocol.
-2) **Audit and tighten T1–T4 semantics** for SMTP and IMAP (especially T2/T4 definitions and logging).
-3) Improve **IMAP realism** so more clients hit the relevant paths.
-4) Improve isolation by moving toward **session-based** (not purely IP-based) mode selection.
+1) Run guided tests across **multiple clients** and compare results to the paper; document discrepancies.
+2) Tighten **T1–T4 semantics** where needed (especially T2/T4 approximation boundaries).
+3) Consider extending scope to **POP3** if the client matrix suggests it adds meaningful coverage.
+4) Consider adding **certificate-related experiments** as a separate track (lab-friendly), if needed for Phase II.
 
 This yields a robust public service that approximates the paper’s threat model at the decision points most relevant to plaintext auth fallback.

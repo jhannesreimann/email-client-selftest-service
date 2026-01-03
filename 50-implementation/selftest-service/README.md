@@ -91,6 +91,30 @@ Important limitation:
 
 ## Usage (end user workflow)
 
+### Quickstart (recommended): Guided mode
+
+Guided mode runs a fixed 9-step sequence and tells the user exactly what to do per testcase.
+
+- Open: `https://selftest.nsipmail.de/guided`
+- Follow the instructions for each step.
+- Use the shown **Email** / **Username** / **Password** in your mail client.
+  - The UI provides small copy-to-clipboard buttons next to values.
+- Press **I did the steps** once you performed the client action.
+
+Notes:
+
+- Guided mode is the recommended default because it reduces user error and makes results comparable across clients.
+- **Skip anyway** is a fallback if the client is stuck and does not reach the expected connection/auth stage.
+- **Abort** stops the run.
+
+### Advanced mode (manual selection)
+
+If you want to test a single testcase only:
+
+- Open: `https://selftest.nsipmail.de/?view=advanced` (or pick a scenario from `/`)
+- Choose a mode (`baseline`, `t1`–`t4`) and scenario (`immediate` / `two_phase`).
+- Start a session and open the status page.
+
 ### 1) Start a session
 
 - Open the WebUI (e.g. `https://selftest.nsipmail.de/`).
@@ -125,6 +149,11 @@ Note:
   - `FAIL`: the service observed an auth/login attempt with `tls=false` (plaintext credentials exposure).
   - `PASS`: the service observed an auth/login attempt with `tls=true` and no plaintext auth.
   - `INCONCLUSIVE`: no auth/login attempt was observed (client aborted early, stuck retrying, or only probed STARTTLS).
+
+For guided runs:
+
+- Each step gets its own verdict. If a step was skipped via the UI, it is labeled `SKIPPED`.
+- The guided results table provides a per-step **View logs** link that opens `/status?session=...` for that step.
 
 ## Deployment (AWS EC2 example)
 
