@@ -628,7 +628,7 @@ __MODE_SELECTION__
   <h1>Mail Client Self-Test</h1>\
   <div class=\"page-actions\">\
     <span class=\"pill\">{scenario}</span>\
-    <a class=\"icon-btn\" href=\"/\" aria-label=\"Back\" title=\"Back\">←</a>\
+    <a class=\"icon-btn\" href=\"/?view=advanced\" aria-label=\"Back\" title=\"Back\">←</a>\
   </div>\
 </div>\
 <p class=\"muted\">WebUI host: <code>{hostname}</code></p>
@@ -911,11 +911,13 @@ __MODE_SELECTION__
         data["overrides"] = overrides
         _save_store(store_path, data)
 
+        back_href = f"/?view=advanced&scenario={scenario}"
+
         body = f"""
 <div class="page-header">
   <h1>Session started</h1>
   <div class="page-actions">
-    <a class="icon-btn" href="/" aria-label="Back" title="Back">←</a>
+    <a class="icon-btn" href="{back_href}" aria-label="Back" title="Back">←</a>
   </div>
 </div>
 <div class="glass-panel">
@@ -1017,17 +1019,38 @@ __MODE_SELECTION__
 
 <div class="glass-panel" style="margin-top: 14px;">
   <div class="row muted">Open the status page now, then configure your mail client and try to login/send mail.</div>
-  <div class="row"><a class="btn btn-cta" href="/status?session={session}">Open status page</a></div>
+  <div class="row"><a class="btn btn-cta" href="/status?session={session}&view=advanced&scenario={scenario}">Open status page</a></div>
 </div>
 """
         return _html_page("Session", body + _copy_script())
 
     @app.get("/status", response_class=HTMLResponse)
-    def status(session: str) -> str:
+    def status(session: str, view: str = "", scenario: str = "") -> str:
         events = _read_events(events_path)
         summary = _summarize_session(events, session)
         hits = summary["events"]
         last = hits[-1] if hits else None
+
+        view = (view or "").strip().lower()
+        scenario = (scenario or "").strip().lower()
+        if view != "advanced":
+            view = ""
+        if scenario not in {"immediate", "two_phase"}:
+            scenario = ""
+
+        if view == "advanced" and scenario:
+            back_href = f"/?view=advanced&scenario={scenario}"
+        elif view == "advanced":
+            back_href = "/?view=advanced"
+        else:
+            back_href = "/"
+
+        if view == "advanced" and scenario:
+            reload_href = f"/status?session={session}&view=advanced&scenario={scenario}"
+        elif view == "advanced":
+            reload_href = f"/status?session={session}&view=advanced"
+        else:
+            reload_href = f"/status?session={session}"
 
         def _row(label: str, value: str) -> str:
             return f"<tr><th>{label}</th><td>{value}</td></tr>"
@@ -1110,8 +1133,8 @@ __MODE_SELECTION__
 <div class="page-header">
   <h1>Status</h1>
   <div class="page-actions">
-    <a class="icon-btn" href="/status?session={session}" aria-label="Reload" title="Reload">↻</a>
-    <a class="icon-btn" href="/" aria-label="Back" title="Back">←</a>
+    <a class="icon-btn" href="{reload_href}" aria-label="Reload" title="Reload">↻</a>
+    <a class="icon-btn" href="{back_href}" aria-label="Back" title="Back">←</a>
   </div>
 </div>
 
