@@ -485,7 +485,12 @@ def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_p
         scenario_choice = ""
         if not scenario:
             scenario_choice = f"""
-<h1>Mail Client Self-Test</h1>
+<div class="page-header">
+  <h1>Mail Client Self-Test</h1>
+  <div class="page-actions">
+    <a class="icon-btn" href="/" aria-label="Back" title="Back">←</a>
+  </div>
+</div>
 <p class=\"muted\">WebUI host: <code>{hostname}</code></p>
 <p class=\"muted\">Autodetect domain: <code>{autodetect_domain}</code></p>
 
