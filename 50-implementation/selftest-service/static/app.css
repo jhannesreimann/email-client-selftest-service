@@ -110,17 +110,37 @@ body {
 .login-container {
   width: min(980px, calc(100vw - 28px));
   max-height: calc(100vh - 28px);
-  padding: 38px 34px;
+  --container-radius: 32px;
   background: var(--glass-bg);
   backdrop-filter: blur(40px) saturate(180%);
-  border: 1px solid var(--glass-border);
-  border-radius: 32px;
+  border: 1px solid transparent;
+  border-radius: var(--container-radius);
   box-shadow: var(--shadow-premium), inset 0 1px 0 rgba(255,255,255,0.05);
   z-index: 100;
   position: relative;
+  overflow: hidden;
+  animation: containerEntrance 1.2s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.login-scroll {
+  max-height: calc(100vh - 28px);
+  padding: 38px 34px;
   overflow: auto;
   -webkit-overflow-scrolling: touch;
-  animation: containerEntrance 1.2s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.login-container::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  box-sizing: border-box;
+  background: linear-gradient(145deg, rgba(255,255,255,0.1), rgba(255,255,255,0.02));
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: xor;
+  -webkit-mask-composite: xor;
+  pointer-events: none;
 }
 
 @keyframes containerEntrance {
@@ -136,26 +156,10 @@ body {
   }
 }
 
-.login-container::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  border-radius: 32px;
-  padding: 1px;
-  background: linear-gradient(145deg, rgba(255,255,255,0.1), rgba(255,255,255,0.02));
-  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  mask-composite: xor;
-  -webkit-mask-composite: xor;
-  pointer-events: none;
-}
-
 h1 {
   font-size: 34px;
   font-weight: 700;
-  letter-spacing: -1px;
+  letter-spacing: -0.5px;
   margin-bottom: 10px;
   background: linear-gradient(135deg, #ffffff, #cbd5e1);
   -webkit-background-clip: text;
@@ -208,6 +212,21 @@ h2 {
 .pill-pass {
   background: rgba(34, 197, 94, 0.14);
   border-color: rgba(34, 197, 94, 0.28);
+}
+
+.pill-warn {
+  background: rgba(251, 191, 36, 0.14);
+  border-color: rgba(251, 191, 36, 0.28);
+}
+
+.pill-na {
+  background: rgba(148, 163, 184, 0.14);
+  border-color: rgba(148, 163, 184, 0.28);
+}
+
+.pill-skip {
+  background: rgba(148, 163, 184, 0.10);
+  border-color: rgba(148, 163, 184, 0.22);
 }
 
 .pill-fail {
@@ -650,15 +669,17 @@ th { color: var(--text-secondary); font-weight: 650; }
 
 @media (max-width: 520px) {
   .login-container {
+    --container-radius: 26px;
+  }
+  .login-scroll {
     padding: 26px 18px;
-    border-radius: 26px;
   }
   h1 { font-size: 28px; }
   .btn { width: 100%; }
 }
 
 @media (max-height: 700px) {
-  .login-container { padding: 26px 26px; }
+  .login-scroll { padding: 26px 26px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

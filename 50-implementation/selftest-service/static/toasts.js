@@ -152,6 +152,26 @@
       });
       markShown(session, 'done_pass');
     }
+
+    if (verdict === 'WARN' && !wasShown(session, 'done_warn')) {
+      showToast(container, {
+        kind: 'warn',
+        title: 'Client prompt reported',
+        msg: 'A downgrade/security prompt was reported in the client UI. Treat this as a warning and do not accept insecure suggestions.',
+        timeoutMs: 22000,
+      });
+      markShown(session, 'done_warn');
+    }
+
+    if (verdict === 'NOT_APPLICABLE' && !wasShown(session, 'done_na')) {
+      showToast(container, {
+        kind: 'info',
+        title: 'Client cannot connect reported',
+        msg: 'The client could not connect in this step (e.g., insists on implicit TLS ports). Try another client or manual STARTTLS settings.',
+        timeoutMs: 22000,
+      });
+      markShown(session, 'done_na');
+    }
   }
 
   window.initToasts = function initToasts(session, opts) {
