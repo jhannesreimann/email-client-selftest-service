@@ -17,10 +17,22 @@ from fastapi.staticfiles import StaticFiles
 
 def _load_store(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return {"default_mode": "baseline", "overrides": [], "guided_runs": {}}
+        return {"default_mode": "baseline", "overrides": [], "guided_runs": {}, "session_reports": {}}
     try:
         with path.open("r", encoding="utf-8") as f:
-            return json.load(f)
+            obj = json.load(f)
+        if isinstance(obj, dict):
+            changed = False
+            if "guided_runs" not in obj:
+                obj["guided_runs"] = {}
+                changed = True
+            if "session_reports" not in obj:
+                obj["session_reports"] = {}
+                changed = True
+            if changed:
+                _save_store(path, obj)
+            return obj
+        return {"default_mode": "baseline", "overrides": [], "guided_runs": {}, "session_reports": {}}
     except json.JSONDecodeError:
         raw = path.read_text(encoding="utf-8", errors="replace")
         try:
@@ -28,11 +40,13 @@ def _load_store(path: Path) -> dict[str, Any]:
             if isinstance(obj, dict):
                 if "guided_runs" not in obj:
                     obj["guided_runs"] = {}
+                if "session_reports" not in obj:
+                    obj["session_reports"] = {}
                 _save_store(path, obj)
                 return obj
         except Exception:
             pass
-        fallback: dict[str, Any] = {"default_mode": "baseline", "overrides": [], "guided_runs": {}}
+        fallback: dict[str, Any] = {"default_mode": "baseline", "overrides": [], "guided_runs": {}, "session_reports": {}}
         _save_store(path, fallback)
         return fallback
 
@@ -244,6 +258,12 @@ def _guided_results_html(run: dict[str, Any]) -> str:
             pill_class += " pill-pass"
         elif verdict.startswith("FAIL"):
             pill_class += " pill-fail"
+        elif verdict == "WARN":
+            pill_class += " pill-warn"
+        elif verdict == "NOT_APPLICABLE":
+            pill_class += " pill-na"
+        elif verdict.startswith("SKIP"):
+            pill_class += " pill-skip"
 
         findings = list(res.get("findings") or [])
         findings_html = " ".join([f"<span class=\"badge\">{_esc_html(str(f))}</span>" for f in findings])
@@ -439,6 +459,32 @@ def _summarize_session(events: list[dict[str, Any]], session: str) -> dict[str, 
         "first_ts": int(hits[0].get("ts", 0)) if hits else None,
         "last_ts": int(hits[-1].get("ts", 0)) if hits else None,
     }
+
+
+def _apply_user_report_to_verdict(base_verdict: str, saw_plain: bool, saw_tls_auth: bool, report_kind: Optional[str]) -> str:
+    if saw_plain:
+        return "FAIL"
+    k = (report_kind or "").strip().lower()
+    if k == "cannot_connect":
+        return "NOT_APPLICABLE"
+    if k == "prompt":
+        return "WARN"
+    if saw_tls_auth:
+        return "PASS"
+    return base_verdict
+
+
+def _get_session_report_kind(data: dict[str, Any], session: str) -> Optional[str]:
+    rep = (data.get("session_reports") or {}).get(session)
+    if not isinstance(rep, dict):
+        return None
+    kind = rep.get("kind")
+    return str(kind) if kind else None
+
+
+def _set_session_report(data: dict[str, Any], session: str, ip: str, kind: str) -> None:
+    data.setdefault("session_reports", {})
+    data["session_reports"][session] = {"kind": kind, "ts": int(time.time()), "ip": ip}
 
 
 def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_path: Path) -> FastAPI:
@@ -652,6 +698,27 @@ __MODE_SELECTION__
     def favicon() -> Response:
         return Response(status_code=int(HTTPStatus.NO_CONTENT))
 
+    @app.post("/api/session/{session}/report")
+    def api_session_report(req: Request, session: str, kind: str = "") -> JSONResponse:
+        ip = _client_ip(req)
+        k = (kind or "").strip().lower()
+        if k not in {"prompt", "cannot_connect"}:
+            return JSONResponse({"ok": False, "error": "invalid kind"}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        data = _load_store(store_path)
+        _prune_overrides(data)
+
+        overrides = list(data.get("overrides") or [])
+        allowed = any(
+            isinstance(o, dict) and str(o.get("ip")) == ip and str(o.get("session")) == session for o in overrides
+        )
+        if not allowed:
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
+
+        _set_session_report(data, session, ip, k)
+        _save_store(store_path, data)
+        return JSONResponse({"ok": True, "session": session, "kind": k})
+
     @app.get("/guided", response_class=HTMLResponse)
     def guided() -> str:
         body = """
@@ -675,6 +742,8 @@ __MODE_SELECTION__
   <div id="guided-manual" style="margin-top: 10px; display:none;"></div>
   <div class="row" style="margin-top: 12px; display:flex; gap:10px; flex-wrap:wrap;" id="guided-controls">
     <a class="btn btn-cta btn-success" id="guided-confirm" href="#">I did the steps</a>
+    <a class="btn" id="guided-report-prompt" href="#">Client showed prompt</a>
+    <a class="btn" id="guided-report-cannot" href="#">Client cannot connect</a>
     <a class="btn" id="guided-skip" href="#">Skip anyway</a>
     <a class="btn btn-danger" id="guided-abort" href="#">Abort</a>
   </div>
@@ -848,6 +917,24 @@ __MODE_SELECTION__
     if (!confirm('Skip this step anyway?')) return;
     const r = await api(`/api/guided/run/${encodeURIComponent(runId)}/skip`, 'POST');
     if (!r.ok) document.getElementById('guided-errors').textContent = r.error || 'skip failed';
+    await poll();
+  });
+
+  document.getElementById('guided-report-prompt').addEventListener('click', async (ev) => {
+    ev.preventDefault();
+    if (!runId) return;
+    if (!confirm('Report that the client showed a security prompt / downgrade suggestion for this step?')) return;
+    const r = await api(`/api/guided/run/${encodeURIComponent(runId)}/report?kind=prompt`, 'POST');
+    if (!r.ok) document.getElementById('guided-errors').textContent = r.error || 'report failed';
+    await poll();
+  });
+
+  document.getElementById('guided-report-cannot').addEventListener('click', async (ev) => {
+    ev.preventDefault();
+    if (!runId) return;
+    if (!confirm('Report that the client cannot connect for this step?')) return;
+    const r = await api(`/api/guided/run/${encodeURIComponent(runId)}/report?kind=cannot_connect`, 'POST');
+    if (!r.ok) document.getElementById('guided-errors').textContent = r.error || 'report failed';
     await poll();
   });
 
@@ -1036,6 +1123,15 @@ __MODE_SELECTION__
         hits = summary["events"]
         last = hits[-1] if hits else None
 
+        data = _load_store(store_path)
+        report_kind = _get_session_report_kind(data, session)
+        verdict = _apply_user_report_to_verdict(
+            str(summary.get("verdict")),
+            bool(summary.get("saw_plain")),
+            bool(summary.get("saw_tls_auth")),
+            report_kind,
+        )
+
         view = (view or "").strip().lower()
         scenario = (scenario or "").strip().lower()
         if view != "advanced":
@@ -1075,13 +1171,18 @@ __MODE_SELECTION__
         else:
             rows.append(_row("Last event", "(none yet)"))
 
-        verdict = str(summary.get("verdict"))
         if verdict == "FAIL":
             headline = "FAIL (plaintext credentials exposure observed)"
             verdict_class = "pill pill-fail"
         elif verdict == "PASS":
             headline = "PASS (no plaintext credentials observed; TLS auth seen)"
             verdict_class = "pill pill-pass"
+        elif verdict == "WARN":
+            headline = "WARN (client prompt/downgrade UI reported)"
+            verdict_class = "pill pill-warn"
+        elif verdict == "NOT_APPLICABLE":
+            headline = "NOT APPLICABLE (client could not connect)"
+            verdict_class = "pill pill-na"
         else:
             headline = "INCONCLUSIVE (no credentials observed yet)"
             verdict_class = "pill"
@@ -1099,6 +1200,14 @@ __MODE_SELECTION__
         if verdict == "INCONCLUSIVE":
             details.append(
                 "<div class=\"row muted\">No auth/login attempt was observed. This often means the client aborted earlier (e.g., due to TLS errors) or got stuck retrying.</div>"
+            )
+        if verdict == "NOT_APPLICABLE":
+            details.append(
+                "<div class=\"row muted\">This result is based on a user report that the client could not connect for this session.</div>"
+            )
+        if verdict == "WARN":
+            details.append(
+                "<div class=\"row muted\">This result is based on a user report that the client showed a security prompt / downgrade suggestion.</div>"
             )
         if retry_like:
             details.append(
@@ -1120,6 +1229,23 @@ __MODE_SELECTION__
                 "<div class=\"row muted\">If you see such prompts, please do <b>not</b> follow them. Take a screenshot and report it as a downgrade indication.</div>"
                 "</div>"
             )
+
+        report_label = "(none)"
+        if report_kind == "prompt":
+            report_label = "Client showed prompt"
+        elif report_kind == "cannot_connect":
+            report_label = "Client cannot connect"
+
+        details.append(
+            "<div class=\"glass-panel\" style=\"margin-top: 12px;\">"
+            "<h2>Report client outcome (optional)</h2>"
+            f"<div class=\"row muted\">Current report: <b>{_esc_html(report_label)}</b></div>"
+            "<div class=\"row\" style=\"margin-top: 10px; display:flex; gap:10px; flex-wrap:wrap;\">"
+            "<a class=\"btn\" id=\"report-prompt\" href=\"#\">Client showed prompt</a>"
+            "<a class=\"btn\" id=\"report-cannot\" href=\"#\">Client cannot connect</a>"
+            "</div>"
+            "</div>"
+        )
 
         table = "<table>" + "".join(rows) + "</table>"
         proto_table = (
@@ -1156,6 +1282,24 @@ __MODE_SELECTION__
 
 <script src="/static/toasts.js"></script>
 <script>initToasts({json.dumps(session)});</script>
+<script>
+  (() => {{
+    const session = {json.dumps(session)};
+    async function report(kind) {{
+      const r = await fetch(`/api/session/${{encodeURIComponent(session)}}/report?kind=${{encodeURIComponent(kind)}}`, {{ method: 'POST' }});
+      const j = await r.json();
+      if (!j || !j.ok) {{
+        alert((j && j.error) ? j.error : 'report failed');
+        return;
+      }}
+      window.location.reload();
+    }}
+    const p = document.getElementById('report-prompt');
+    const c = document.getElementById('report-cannot');
+    if (p) p.addEventListener('click', (ev) => {{ ev.preventDefault(); report('prompt'); }});
+    if (c) c.addEventListener('click', (ev) => {{ ev.preventDefault(); report('cannot_connect'); }});
+  }})();
+</script>
 """
         return _html_page("Status", body + _copy_script())
 
@@ -1212,7 +1356,15 @@ __MODE_SELECTION__
     def api_session(session: str) -> JSONResponse:
         events = _read_events(events_path)
         summary = _summarize_session(events, session)
-        return JSONResponse({"ok": True, "session": session, "verdict": summary.get("verdict"), "summary": {"smtp": summary.get("smtp"), "imap": summary.get("imap"), "retry_like": summary.get("retry_like"), "starttls_refused_like": summary.get("starttls_refused_like"), "saw_plain": summary.get("saw_plain"), "saw_tls_auth": summary.get("saw_tls_auth")}, "events": summary.get("events", [])[-200:]})
+        data = _load_store(store_path)
+        report_kind = _get_session_report_kind(data, session)
+        verdict = _apply_user_report_to_verdict(
+            str(summary.get("verdict")),
+            bool(summary.get("saw_plain")),
+            bool(summary.get("saw_tls_auth")),
+            report_kind,
+        )
+        return JSONResponse({"ok": True, "session": session, "verdict": verdict, "report": {"kind": report_kind}, "summary": {"smtp": summary.get("smtp"), "imap": summary.get("imap"), "retry_like": summary.get("retry_like"), "starttls_refused_like": summary.get("starttls_refused_like"), "saw_plain": summary.get("saw_plain"), "saw_tls_auth": summary.get("saw_tls_auth")}, "events": summary.get("events", [])[-200:]})
 
     def _guided_get_run(data: dict[str, Any], run_id: str) -> Optional[dict[str, Any]]:
         data.setdefault("guided_runs", {})
@@ -1304,9 +1456,15 @@ __MODE_SELECTION__
 
     def _guided_finish_step(step: dict[str, Any], summary: dict[str, Any], forced_verdict: Optional[str] = None) -> None:
         verdict = str(forced_verdict or summary.get("verdict") or "INCONCLUSIVE")
+        findings = _guided_findings(summary)
+        user_report = step.get("user_report")
+        if user_report == "prompt":
+            findings.append("user_prompt")
+        elif user_report == "cannot_connect":
+            findings.append("user_cannot_connect")
         step["result"] = {
             "verdict": verdict,
-            "findings": _guided_findings(summary),
+            "findings": findings,
             "detail": {
                 "smtp": summary.get("smtp"),
                 "imap": summary.get("imap"),
@@ -1453,6 +1611,44 @@ __MODE_SELECTION__
             return JSONResponse({"ok": False, "error": "not ready", "missing": missing}, status_code=int(HTTPStatus.BAD_REQUEST))
 
         _guided_finish_step(step, summary)
+        _guided_advance_run(data, run)
+        data.setdefault("guided_runs", {})
+        data["guided_runs"][run_id] = run
+        _save_store(store_path, data)
+        return JSONResponse({"ok": True})
+
+    @app.post("/api/guided/run/{run_id}/report")
+    def api_guided_report(req: Request, run_id: str, kind: str = "") -> JSONResponse:
+        ip = _client_ip(req)
+        k = (kind or "").strip().lower()
+        if k not in {"prompt", "cannot_connect"}:
+            return JSONResponse({"ok": False, "error": "invalid kind"}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        data = _load_store(store_path)
+        run = _guided_get_run(data, run_id)
+        if run is None:
+            return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
+        if str(run.get("ip")) != ip:
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
+        if str(run.get("status")) != "running":
+            return JSONResponse({"ok": False, "error": "not running"}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        step = _guided_current_step(run)
+        if step is None:
+            return JSONResponse({"ok": False, "error": "invalid step"}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        session = str(step.get("session") or "")
+        if not session:
+            return JSONResponse({"ok": False, "error": "missing session"}, status_code=int(HTTPStatus.BAD_REQUEST))
+
+        _prune_overrides(data)
+        _set_session_report(data, session, ip, k)
+
+        step["user_report"] = k
+        events = _read_events(events_path)
+        summary = _summarize_session(events, session)
+        forced = "WARN" if k == "prompt" else "NOT_APPLICABLE"
+        _guided_finish_step(step, summary, forced_verdict=forced)
         _guided_advance_run(data, run)
         data.setdefault("guided_runs", {})
         data["guided_runs"][run_id] = run
