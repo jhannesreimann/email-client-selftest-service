@@ -282,6 +282,54 @@ server {
 }
 ```
 
+### WebUI demo login (shared password)
+
+For demos, the WebUI can be protected with a single shared password (no user accounts).
+
+- If no password is configured, login is disabled and the WebUI remains public.
+- If enabled, everything is protected except:
+  - `/login`, `/logout`
+  - `/static/*`
+  - `/api/health` (kept open for health checks)
+
+Configuration options:
+
+- Env var: `NSIP_SELFTEST_DEMO_PASSWORD`
+- Secret file: `NSIP_SELFTEST_DEMO_PASSWORD_FILE=/path/to/file`
+
+Recommended: use a secret file under `/etc`.
+
+Example secret file (readable by the `nsip-selftest` service user):
+
+```bash
+sudo install -d -m 750 /etc/nsip-selftest
+sudo chown root:nsip-selftest /etc/nsip-selftest
+
+sudo sh -c 'printf "%s" "<your-long-demo-password>" > /etc/nsip-selftest/demo_password'
+sudo chown root:nsip-selftest /etc/nsip-selftest/demo_password
+sudo chmod 640 /etc/nsip-selftest/demo_password
+```
+
+systemd drop-in (recommended):
+
+```bash
+sudo env TERM=xterm systemctl edit nsip-selftest-webui.service
+```
+
+Add:
+
+```ini
+[Service]
+Environment="NSIP_SELFTEST_DEMO_PASSWORD_FILE=/etc/nsip-selftest/demo_password"
+```
+
+Apply:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart nsip-selftest-webui.service
+```
+
 ## Operations / quick checks
 
 Listening ports:

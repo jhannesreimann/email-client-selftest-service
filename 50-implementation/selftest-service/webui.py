@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
+import base64
+import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -9,9 +12,10 @@ import time
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import parse_qs, quote
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 
@@ -490,9 +494,152 @@ def _set_session_report(data: dict[str, Any], session: str, ip: str, kind: str) 
 def create_app(hostname: str, autodetect_domain: str, store_path: Path, events_path: Path) -> FastAPI:
     app = FastAPI()
 
+    def _demo_password() -> str:
+        pw = (os.environ.get("NSIP_SELFTEST_DEMO_PASSWORD") or "").strip()
+        if pw:
+            return pw
+        pw_file = (os.environ.get("NSIP_SELFTEST_DEMO_PASSWORD_FILE") or "").strip()
+        if pw_file:
+            try:
+                return Path(pw_file).read_text(encoding="utf-8").strip()
+            except Exception:
+                return ""
+        return ""
+
+    def _demo_cookie_name() -> str:
+        return "nsip_selftest_demo"
+
+    def _demo_cookie_key() -> bytes:
+        pw = _demo_password()
+        return pw.encode("utf-8")
+
+    def _sign_demo_cookie(value: str) -> str:
+        key = _demo_cookie_key()
+        sig = hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()
+        return f"{value}.{sig}"
+
+    def _verify_demo_cookie(raw: str, max_age_s: int) -> bool:
+        pw = _demo_password()
+        if not pw:
+            return True
+        if not raw:
+            return False
+        parts = raw.split(".")
+        if len(parts) < 3:
+            return False
+        sig = parts[-1]
+        value = ".".join(parts[:-1])
+        key = _demo_cookie_key()
+        expected = hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            return False
+        try:
+            ts = int(value.split(".", 1)[0])
+        except Exception:
+            return False
+        return (int(time.time()) - ts) <= int(max_age_s)
+
+    def _is_https(req: Request) -> bool:
+        proto = (req.headers.get("x-forwarded-proto") or "").strip().lower()
+        if proto:
+            return proto == "https"
+        return str(req.url.scheme).lower() == "https"
+
+    def _requires_demo_auth() -> bool:
+        return bool(_demo_password())
+
+    @app.middleware("http")
+    async def _demo_auth_middleware(req: Request, call_next):
+        if not _requires_demo_auth():
+            return await call_next(req)
+
+        p = req.url.path or "/"
+        if p in {"/login", "/logout", "/favicon.ico"} or p.startswith("/static/") or p == "/api/health":
+            return await call_next(req)
+
+        cookie = req.cookies.get(_demo_cookie_name(), "")
+        if _verify_demo_cookie(cookie, max_age_s=12 * 3600):
+            return await call_next(req)
+
+        if p.startswith("/api/"):
+            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=int(HTTPStatus.UNAUTHORIZED))
+
+        full = p
+        if req.url.query:
+            full = full + "?" + str(req.url.query)
+        return RedirectResponse(url=f"/login?next={quote(full)}", status_code=int(HTTPStatus.SEE_OTHER))
+
     static_dir = Path(__file__).resolve().parent / "static"
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    @app.get("/login", response_class=HTMLResponse)
+    def login(next: str = "") -> str:
+        if not _requires_demo_auth():
+            return _html_page("Login", '<div class="glass-panel"><div class="row">Login is disabled.</div><div class="row" style="margin-top: 12px;"><a class="btn btn-cta" href="/">Continue</a></div></div>')
+
+        nxt = (next or "").strip()
+        body = f"""
+<div class="page-header">
+  <h1>Login</h1>
+</div>
+
+<div class=\"glass-panel\">
+  <div class=\"row muted\">This instance is temporarily protected for a demo.</div>
+  <form method=\"post\" action=\"/login\" style=\"margin-top: 12px;\">
+    <input type=\"hidden\" name=\"next\" value=\"{_esc_html(nxt)}\" />
+    <div class=\"row\"><b>Password</b></div>
+    <div class=\"row\"><input name=\"password\" type=\"password\" autocomplete=\"current-password\" style=\"width: 100%; padding: 10px 12px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.04); color: var(--text-primary);\" /></div>
+    <div class=\"row\" style=\"margin-top: 12px;\"><button class=\"btn btn-cta\" type=\"submit\">Sign in</button></div>
+  </form>
+</div>
+"""
+        return _html_page("Login", body)
+
+    @app.post("/login")
+    async def login_post(req: Request) -> Response:
+        if not _requires_demo_auth():
+            return RedirectResponse(url="/", status_code=int(HTTPStatus.SEE_OTHER))
+
+        raw = (await req.body()).decode("utf-8", errors="replace")
+        form = parse_qs(raw, keep_blank_values=True)
+        password = (form.get("password") or [""])[0]
+        nxt = (form.get("next") or [""])[0]
+
+        pw = _demo_password()
+        if not password or not hmac.compare_digest(password, pw):
+            body = (
+                "<div class=\"page-header\"><h1>Login</h1></div>"
+                "<div class=\"glass-panel\">"
+                "<div class=\"row\"><span class=\"pill pill-fail\">Invalid password</span></div>"
+                "<div class=\"row muted\" style=\"margin-top: 10px;\">Please try again.</div>"
+                + f"<div class=\"row\" style=\"margin-top: 12px;\"><a class=\"btn btn-cta\" href=\"/login?next={quote(nxt or '')}\">Back</a></div>"
+                + "</div>"
+            )
+            return HTMLResponse(_html_page("Login", body), status_code=int(HTTPStatus.UNAUTHORIZED))
+
+        value = f"{int(time.time())}.{secrets.token_hex(12)}"
+        cookie_val = _sign_demo_cookie(value)
+
+        target = (nxt or "/").strip() or "/"
+        if not target.startswith("/"):
+            target = "/"
+        resp = RedirectResponse(url=target, status_code=int(HTTPStatus.SEE_OTHER))
+        resp.set_cookie(
+            _demo_cookie_name(),
+            cookie_val,
+            max_age=12 * 3600,
+            httponly=True,
+            samesite="lax",
+            secure=_is_https(req),
+        )
+        return resp
+
+    @app.get("/logout")
+    def logout() -> Response:
+        resp = RedirectResponse(url="/login", status_code=int(HTTPStatus.SEE_OTHER))
+        resp.delete_cookie(_demo_cookie_name())
+        return resp
 
     @app.get("/", response_class=HTMLResponse)
     def index(req: Request, scenario: str = "", view: str = "") -> str:
