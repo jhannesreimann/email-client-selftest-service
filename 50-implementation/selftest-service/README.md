@@ -149,6 +149,8 @@ Note:
   - `FAIL`: the service observed an auth/login attempt with `tls=false` (plaintext credentials exposure).
   - `PASS`: the service observed an auth/login attempt with `tls=true` and no plaintext auth.
   - `INCONCLUSIVE`: no auth/login attempt was observed (client aborted early, stuck retrying, or only probed STARTTLS).
+  - `WARN`: the user reported that the client showed a security prompt / downgrade warning.
+  - `NOT_APPLICABLE`: the user reported that the client could not connect, so the step is not measurable.
 
 For guided runs:
 
