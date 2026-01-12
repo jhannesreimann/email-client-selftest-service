@@ -2,12 +2,15 @@
 
 import argparse
 import base64
+import contextlib
+import fcntl
 import hashlib
 import hmac
 import json
 import os
 import secrets
 import socket
+import threading
 import time
 from http import HTTPStatus
 from pathlib import Path
@@ -19,7 +22,26 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 
 
-def _load_store(path: Path) -> dict[str, Any]:
+_STORE_THREAD_LOCK = threading.RLock()
+
+
+@contextlib.contextmanager
+def _store_lock(path: Path):
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _STORE_THREAD_LOCK:
+        with lock_path.open("a", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+
+
+def _load_store_unlocked(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"default_mode": "baseline", "overrides": [], "guided_runs": {}, "session_reports": {}}
     try:
@@ -34,7 +56,7 @@ def _load_store(path: Path) -> dict[str, Any]:
                 obj["session_reports"] = {}
                 changed = True
             if changed:
-                _save_store(path, obj)
+                _save_store_unlocked(path, obj)
             return obj
         return {"default_mode": "baseline", "overrides": [], "guided_runs": {}, "session_reports": {}}
     except json.JSONDecodeError:
@@ -46,21 +68,31 @@ def _load_store(path: Path) -> dict[str, Any]:
                     obj["guided_runs"] = {}
                 if "session_reports" not in obj:
                     obj["session_reports"] = {}
-                _save_store(path, obj)
+                _save_store_unlocked(path, obj)
                 return obj
         except Exception:
             pass
         fallback: dict[str, Any] = {"default_mode": "baseline", "overrides": [], "guided_runs": {}, "session_reports": {}}
-        _save_store(path, fallback)
+        _save_store_unlocked(path, fallback)
         return fallback
 
 
-def _save_store(path: Path, data: dict[str, Any]) -> None:
+def _save_store_unlocked(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{secrets.token_hex(6)}.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f)
     os.replace(tmp, path)
+
+
+def _load_store(path: Path) -> dict[str, Any]:
+    with _store_lock(path):
+        return _load_store_unlocked(path)
+
+
+def _save_store(path: Path, data: dict[str, Any]) -> None:
+    with _store_lock(path):
+        _save_store_unlocked(path, data)
 
 
 def _prune_overrides(data: dict[str, Any]) -> None:
@@ -901,7 +933,9 @@ __MODE_SELECTION__
 
 <script>
   let runId = null;
+  let starting = false;
   let pollTimer = null;
+  let pollInFlight = false;
   let lastRender = {
     status: null,
     step_index: null,
@@ -923,13 +957,30 @@ __MODE_SELECTION__
 
   async function api(path, method='GET') {
     const r = await fetch(path, {method});
-    return await r.json();
+    let j = null;
+    try {
+      j = await r.json();
+    } catch (e) {
+      return {ok: false, error: `HTTP ${r.status}`};
+    }
+    if (!r.ok && (j && typeof j.ok === 'undefined')) {
+      return {ok: false, error: j.detail || `HTTP ${r.status}`};
+    }
+    return j;
   }
 
   function setDisabled(el, disabled) {
     if (!el) return;
     if (disabled) el.classList.add('btn-disabled');
     else el.classList.remove('btn-disabled');
+  }
+
+  function setControlsDisabled(disabled) {
+    setDisabled(document.getElementById('guided-confirm'), disabled);
+    setDisabled(document.getElementById('guided-report-prompt'), disabled);
+    setDisabled(document.getElementById('guided-report-cannot'), disabled);
+    setDisabled(document.getElementById('guided-skip'), disabled);
+    setDisabled(document.getElementById('guided-abort'), disabled);
   }
 
   function setTextIfChanged(el, next) {
@@ -1030,29 +1081,45 @@ __MODE_SELECTION__
 
   async function poll() {
     if (!runId) return;
+    if (pollInFlight) return;
+    pollInFlight = true;
+    try {
     const st = await api(`/api/guided/run/${encodeURIComponent(runId)}`);
     if (!st.ok) {
       document.getElementById('guided-errors').textContent = st.error || 'poll failed';
       return;
     }
     render(st);
+    } finally {
+      pollInFlight = false;
+    }
   }
 
   async function start() {
-    const r = await api('/api/guided/run/start', 'POST');
-    if (!r.ok) {
-      document.getElementById('guided-errors').textContent = r.error || 'start failed';
-      return;
+    if (runId || starting) return;
+    starting = true;
+    setControlsDisabled(true);
+    try {
+      const r = await api('/api/guided/run/start', 'POST');
+      if (!r.ok) {
+        document.getElementById('guided-errors').textContent = r.error || 'start failed';
+        return;
+      }
+      runId = r.run_id;
+      setControlsDisabled(false);
+      await poll();
+      pollTimer = setInterval(poll, 1200);
+    } finally {
+      starting = false;
+      if (!runId) setControlsDisabled(false);
     }
-    runId = r.run_id;
-    await poll();
-    pollTimer = setInterval(poll, 1200);
   }
 
   document.getElementById('guided-confirm').addEventListener('click', async (ev) => {
     ev.preventDefault();
+    if (!runId) await start();
     if (!runId) return;
-    if (ev.target.classList.contains('btn-disabled')) return;
+    if (ev.currentTarget.classList.contains('btn-disabled')) return;
     const r = await api(`/api/guided/run/${encodeURIComponent(runId)}/confirm`, 'POST');
     if (!r.ok) document.getElementById('guided-errors').textContent = r.error || 'confirm failed';
     await poll();
@@ -1060,6 +1127,7 @@ __MODE_SELECTION__
 
   document.getElementById('guided-skip').addEventListener('click', async (ev) => {
     ev.preventDefault();
+    if (!runId) await start();
     if (!runId) return;
     if (!confirm('Skip this step anyway?')) return;
     const r = await api(`/api/guided/run/${encodeURIComponent(runId)}/skip`, 'POST');
@@ -1069,6 +1137,7 @@ __MODE_SELECTION__
 
   document.getElementById('guided-report-prompt').addEventListener('click', async (ev) => {
     ev.preventDefault();
+    if (!runId) await start();
     if (!runId) return;
     if (!confirm('Report that the client showed a security prompt / downgrade suggestion for this step?')) return;
     const r = await api(`/api/guided/run/${encodeURIComponent(runId)}/report?kind=prompt`, 'POST');
@@ -1078,6 +1147,7 @@ __MODE_SELECTION__
 
   document.getElementById('guided-report-cannot').addEventListener('click', async (ev) => {
     ev.preventDefault();
+    if (!runId) await start();
     if (!runId) return;
     if (!confirm('Report that the client cannot connect for this step?')) return;
     const r = await api(`/api/guided/run/${encodeURIComponent(runId)}/report?kind=cannot_connect`, 'POST');
@@ -1087,6 +1157,7 @@ __MODE_SELECTION__
 
   document.getElementById('guided-abort').addEventListener('click', async (ev) => {
     ev.preventDefault();
+    if (!runId) await start();
     if (!runId) return;
     if (!confirm('Abort the guided run?')) return;
     const r = await api(`/api/guided/run/${encodeURIComponent(runId)}/abort`, 'POST');
@@ -1710,59 +1781,61 @@ __MODE_SELECTION__
             "show_manual": bool(show_manual),
             "manual_html": _guided_manual_html() if show_manual else "",
         }
-
-        data.setdefault("guided_runs", {})
-        data["guided_runs"][str(run.get("run_id"))] = run
-        _save_store(store_path, data)
         return resp
 
     @app.get("/api/guided/run/{run_id}")
     def api_guided_get(req: Request, run_id: str) -> JSONResponse:
         ip = _client_ip(req)
-        data = _load_store(store_path)
-        run = _guided_get_run(data, run_id)
-        if run is None:
-            return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
-        if str(run.get("ip")) != ip:
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
-        resp = _guided_state_response(data, run)
-        if not resp.get("ok"):
-            return JSONResponse(resp, status_code=int(HTTPStatus.BAD_REQUEST))
-        return JSONResponse(resp)
+        with _store_lock(store_path):
+            data = _load_store_unlocked(store_path)
+            run = _guided_get_run(data, run_id)
+            if run is None:
+                return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
+            if str(run.get("ip")) != ip:
+                return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
+            resp = _guided_state_response(data, run)
+            if not resp.get("ok"):
+                return JSONResponse(resp, status_code=int(HTTPStatus.BAD_REQUEST))
+            data.setdefault("guided_runs", {})
+            data["guided_runs"][str(run.get("run_id"))] = run
+            _save_store_unlocked(store_path, data)
+            return JSONResponse(resp)
 
     @app.post("/api/guided/run/{run_id}/confirm")
     def api_guided_confirm(req: Request, run_id: str) -> JSONResponse:
         ip = _client_ip(req)
-        data = _load_store(store_path)
-        run = _guided_get_run(data, run_id)
-        if run is None:
-            return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
-        if str(run.get("ip")) != ip:
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
-        if str(run.get("status")) != "running":
-            return JSONResponse({"ok": False, "error": "not running"}, status_code=int(HTTPStatus.BAD_REQUEST))
+        with _store_lock(store_path):
+            data = _load_store_unlocked(store_path)
+            run = _guided_get_run(data, run_id)
+            if run is None:
+                return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
+            if str(run.get("ip")) != ip:
+                return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
+            if str(run.get("status")) != "running":
+                return JSONResponse({"ok": False, "error": "not running"}, status_code=int(HTTPStatus.BAD_REQUEST))
 
-        step = _guided_current_step(run)
-        if step is None:
-            return JSONResponse({"ok": False, "error": "invalid step"}, status_code=int(HTTPStatus.BAD_REQUEST))
+            step = _guided_current_step(run)
+            if step is None:
+                return JSONResponse({"ok": False, "error": "invalid step"}, status_code=int(HTTPStatus.BAD_REQUEST))
 
-        session = str(step.get("session") or "")
-        events = _read_events(events_path)
-        summary = _summarize_session(events, session)
-        prev = dict(step.get("milestones") or {})
-        fill, _, flags, missing = _guided_step_progress(step, summary, prev)
-        step["milestones"] = flags
-        step["step_progress"] = float(fill)
-        ready = all(bool(v) for v in flags.values()) if flags else False
-        if not ready:
-            return JSONResponse({"ok": False, "error": "not ready", "missing": missing}, status_code=int(HTTPStatus.BAD_REQUEST))
+            session = str(step.get("session") or "")
+            events = _read_events(events_path)
+            summary = _summarize_session(events, session)
+            prev = dict(step.get("milestones") or {})
+            fill, _, flags, missing = _guided_step_progress(step, summary, prev)
+            step["milestones"] = flags
+            step["step_progress"] = float(fill)
+            ready = all(bool(v) for v in flags.values()) if flags else False
+            if not ready:
+                return JSONResponse({"ok": False, "error": "not ready", "missing": missing}, status_code=int(HTTPStatus.BAD_REQUEST))
 
-        _guided_finish_step(step, summary)
-        _guided_advance_run(data, run)
-        data.setdefault("guided_runs", {})
-        data["guided_runs"][run_id] = run
-        _save_store(store_path, data)
-        return JSONResponse({"ok": True})
+            _guided_finish_step(step, summary)
+            _guided_advance_run(data, run)
+            resp = _guided_state_response(data, run)
+            data.setdefault("guided_runs", {})
+            data["guided_runs"][run_id] = run
+            _save_store_unlocked(store_path, data)
+            return JSONResponse(resp)
 
     @app.post("/api/guided/run/{run_id}/report")
     def api_guided_report(req: Request, run_id: str, kind: str = "") -> JSONResponse:
@@ -1770,84 +1843,89 @@ __MODE_SELECTION__
         k = (kind or "").strip().lower()
         if k not in {"prompt", "cannot_connect"}:
             return JSONResponse({"ok": False, "error": "invalid kind"}, status_code=int(HTTPStatus.BAD_REQUEST))
+        with _store_lock(store_path):
+            data = _load_store_unlocked(store_path)
+            run = _guided_get_run(data, run_id)
+            if run is None:
+                return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
+            if str(run.get("ip")) != ip:
+                return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
+            if str(run.get("status")) != "running":
+                return JSONResponse({"ok": False, "error": "not running"}, status_code=int(HTTPStatus.BAD_REQUEST))
 
-        data = _load_store(store_path)
-        run = _guided_get_run(data, run_id)
-        if run is None:
-            return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
-        if str(run.get("ip")) != ip:
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
-        if str(run.get("status")) != "running":
-            return JSONResponse({"ok": False, "error": "not running"}, status_code=int(HTTPStatus.BAD_REQUEST))
+            step = _guided_current_step(run)
+            if step is None:
+                return JSONResponse({"ok": False, "error": "invalid step"}, status_code=int(HTTPStatus.BAD_REQUEST))
 
-        step = _guided_current_step(run)
-        if step is None:
-            return JSONResponse({"ok": False, "error": "invalid step"}, status_code=int(HTTPStatus.BAD_REQUEST))
+            session = str(step.get("session") or "")
+            if not session:
+                return JSONResponse({"ok": False, "error": "missing session"}, status_code=int(HTTPStatus.BAD_REQUEST))
 
-        session = str(step.get("session") or "")
-        if not session:
-            return JSONResponse({"ok": False, "error": "missing session"}, status_code=int(HTTPStatus.BAD_REQUEST))
+            _prune_overrides(data)
+            _set_session_report(data, session, ip, k)
 
-        _prune_overrides(data)
-        _set_session_report(data, session, ip, k)
-
-        step["user_report"] = k
-        events = _read_events(events_path)
-        summary = _summarize_session(events, session)
-        forced = "WARN" if k == "prompt" else "NOT_APPLICABLE"
-        _guided_finish_step(step, summary, forced_verdict=forced)
-        _guided_advance_run(data, run)
-        data.setdefault("guided_runs", {})
-        data["guided_runs"][run_id] = run
-        _save_store(store_path, data)
-        return JSONResponse({"ok": True})
+            step["user_report"] = k
+            events = _read_events(events_path)
+            summary = _summarize_session(events, session)
+            forced = "WARN" if k == "prompt" else "NOT_APPLICABLE"
+            _guided_finish_step(step, summary, forced_verdict=forced)
+            _guided_advance_run(data, run)
+            resp = _guided_state_response(data, run)
+            data.setdefault("guided_runs", {})
+            data["guided_runs"][run_id] = run
+            _save_store_unlocked(store_path, data)
+            return JSONResponse(resp)
 
     @app.post("/api/guided/run/{run_id}/skip")
     def api_guided_skip(req: Request, run_id: str) -> JSONResponse:
         ip = _client_ip(req)
-        data = _load_store(store_path)
-        run = _guided_get_run(data, run_id)
-        if run is None:
-            return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
-        if str(run.get("ip")) != ip:
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
-        if str(run.get("status")) != "running":
-            return JSONResponse({"ok": False, "error": "not running"}, status_code=int(HTTPStatus.BAD_REQUEST))
+        with _store_lock(store_path):
+            data = _load_store_unlocked(store_path)
+            run = _guided_get_run(data, run_id)
+            if run is None:
+                return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
+            if str(run.get("ip")) != ip:
+                return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
+            if str(run.get("status")) != "running":
+                return JSONResponse({"ok": False, "error": "not running"}, status_code=int(HTTPStatus.BAD_REQUEST))
 
-        step = _guided_current_step(run)
-        if step is None:
-            return JSONResponse({"ok": False, "error": "invalid step"}, status_code=int(HTTPStatus.BAD_REQUEST))
+            step = _guided_current_step(run)
+            if step is None:
+                return JSONResponse({"ok": False, "error": "invalid step"}, status_code=int(HTTPStatus.BAD_REQUEST))
 
-        session = str(step.get("session") or "")
-        events = _read_events(events_path)
-        summary = _summarize_session(events, session)
-        _guided_finish_step(step, summary, forced_verdict="SKIPPED")
-        _guided_advance_run(data, run)
-        data.setdefault("guided_runs", {})
-        data["guided_runs"][run_id] = run
-        _save_store(store_path, data)
-        return JSONResponse({"ok": True})
+            session = str(step.get("session") or "")
+            events = _read_events(events_path)
+            summary = _summarize_session(events, session)
+            _guided_finish_step(step, summary, forced_verdict="SKIPPED")
+            _guided_advance_run(data, run)
+            resp = _guided_state_response(data, run)
+            data.setdefault("guided_runs", {})
+            data["guided_runs"][run_id] = run
+            _save_store_unlocked(store_path, data)
+            return JSONResponse(resp)
 
     @app.post("/api/guided/run/{run_id}/abort")
     def api_guided_abort(req: Request, run_id: str) -> JSONResponse:
         ip = _client_ip(req)
-        data = _load_store(store_path)
-        run = _guided_get_run(data, run_id)
-        if run is None:
-            return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
-        if str(run.get("ip")) != ip:
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
-        if str(run.get("status")) not in {"running", "aborted"}:
-            return JSONResponse({"ok": False, "error": "cannot abort"}, status_code=int(HTTPStatus.BAD_REQUEST))
+        with _store_lock(store_path):
+            data = _load_store_unlocked(store_path)
+            run = _guided_get_run(data, run_id)
+            if run is None:
+                return JSONResponse({"ok": False, "error": "unknown run"}, status_code=int(HTTPStatus.NOT_FOUND))
+            if str(run.get("ip")) != ip:
+                return JSONResponse({"ok": False, "error": "forbidden"}, status_code=int(HTTPStatus.FORBIDDEN))
+            if str(run.get("status")) not in {"running", "aborted"}:
+                return JSONResponse({"ok": False, "error": "cannot abort"}, status_code=int(HTTPStatus.BAD_REQUEST))
 
-        run["status"] = "aborted"
-        run["aborted_ts"] = int(time.time())
-        data["overrides"] = [o for o in data.get("overrides", []) if o.get("ip") != ip]
-        run["last_progress"] = float(run.get("last_progress") or 0.0)
-        data.setdefault("guided_runs", {})
-        data["guided_runs"][run_id] = run
-        _save_store(store_path, data)
-        return JSONResponse({"ok": True})
+            run["status"] = "aborted"
+            run["aborted_ts"] = int(time.time())
+            data["overrides"] = [o for o in data.get("overrides", []) if o.get("ip") != ip]
+            run["last_progress"] = float(run.get("last_progress") or 0.0)
+            resp = _guided_state_response(data, run)
+            data.setdefault("guided_runs", {})
+            data["guided_runs"][run_id] = run
+            _save_store_unlocked(store_path, data)
+            return JSONResponse(resp)
 
     @app.exception_handler(Exception)
     def _err(_: Request, exc: Exception) -> JSONResponse:
