@@ -20,6 +20,11 @@ Protocol files follow this format: `YYYYMMDD_Meeting-XX.md`
 | 2025-11-24 | [05](20251124_Meeting-05.md) | Cancelled | Postponed due to illness, rescheduled to Dec 1 |
 | 2025-12-01 | [06](20251201_Meeting-06.md) | Supervisor | Setup & mitmproxy explanation, Test case execution, Lightning talk prep |
 | 2025-12-15 | [07](20251215_Meeting-07.md) | Supervisor | Shodan findings, lightning talk feedback, next presentation guidance, extension ideas |
+| 2026-01-05 | [08](20260105_Meeting-08.md) | Supervisor | Self-test service live demo, client downgrade simulation, implementation approach |
+| 2026-01-19 | [09](20260119_Meeting-09.md) | Supervisor | Intermediate presentation feedback, paper & presentation structure |
+| 2026-01-26 | 10 | Cancelled | Nothing new to discuss |
+| 2026-02-02 | [11](20260202_Meeting-11.md) | Supervisor | Paper scope, related work, Shodan explanation, system architecture, challenges |
+| 2026-02-09 | [12](20260209_Meeting-12.md) | Supervisor | Final presentation review, email security intro, existing tools, Shodan limits, demo events |
 
 ## Protocol Template
 
