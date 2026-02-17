@@ -13,11 +13,12 @@
 | **I** | Literature Review | ✅ Complete | NDSS 2025 paper analyzed |
 | **I** | Server Infrastructure | ✅ Operational | AWS EC2 @ mail.nsipmail.de |
 | **I** | MITM Framework | ✅ Ready | Test cases T1-T4 integrated |
-| **I** | Client Testing | 🔄 In Progress | First results in `60-findings/` |
-| **II** | Attack Demonstrations | 📋 Planned | Q1 2026 |
-| **II** | Certificate Tests | ❓ Planned | Q1 2026 |
-
-**Next Milestone:** Intermediate Presentation (Phase I) + expand multi-client testing using the public self-test service
+| **I** | Manual Client Testing with Proxy | ✅ Complete | First results in `60-findings/` |
+| **I** | Selftest Service implementation | ✅ Complete | in `50-implementation/selftest-service` |
+| **II** | Attack Demonstrations with Selftest Service | ✅ Complete | first Demo during Intermediate presentation |
+| **II** | Certificate Tests | Cancelled | Focused on practical user-orieted testing service instead |
+| **II** | Configuration scanner for email server admins | ✅ Complete | in `50-implementation/server-checker` |
+| **II** | Final presentation & Demo | ✅ Complete | in `00-deliverables` |
 
 ---
 
@@ -237,28 +238,6 @@ Our project recreates and extends the research from the NDSS 2025 paper "A Multi
 3. What certificate validation weaknesses exist in popular email clients?
 4. How do real-world setup guides (e.g., HPI documentation) impact user security?
 
-### Phase I Status (Current)
-- ✅ Literature review and paper analysis (NDSS 2025 paper)
-- ✅ Email server testbed deployed (AWS EC2 @ mail.nsipmail.de)
-- ✅ MITM framework ready (mitmproxy with T1-T4 test cases)
-- ✅ Public self-test service deployed (selftest.nsipmail.de)
-- 🔄 Client testing in progress (expanding across clients/platforms)
-- 📋 Initial attack demonstrations pending
-
-### Phase II Focus (Upcoming)
-- Complete client testing across multiple platforms
-- Certificate validation experiments (C1-C4)
-- Real-world setup guide analysis
-- Experiments, measurements, and security analysis
-- Comparison with original paper findings
-
-### Implementation Details
-For detailed information about the server setup, attack scripts, and testing methodology, see:
-- **Implementation Overview:** [`50-implementation/README.md`](./50-implementation/README.md)
-- **Server Configuration:** [`50-implementation/server-setup/README.md`](./50-implementation/server-setup/README.md)
-- **Attack Scripts:** [`50-implementation/mitm-scripts/README.md`](./50-implementation/mitm-scripts/README.md)
-- **Test Results:** [`60-findings/README.md`](./60-findings/README.md)
-
 ---
 
 ## 📝 Working Practices
@@ -272,4 +251,4 @@ For detailed information about the server setup, attack scripts, and testing met
 
 ---
 
-*Last Updated: January 2026*
+*Last Updated: February 2026*
