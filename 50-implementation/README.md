@@ -1,10 +1,13 @@
 # Implementation & Setup
 
 This directory contains all practical implementation work:
+
 Manual setup-related:
 * server configuration in `server-setup/` - See [`server-setup/README.md`](./server-setup/README.md)
 * attack scripts `mitm-scripts/`
 * test configurations `test-setup/`
+
+Practical contributions:
 * Selftest service - `selftest-service/`
 * Server config scanner - `server-checker/`
 
