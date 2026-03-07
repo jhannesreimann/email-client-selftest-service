@@ -22,20 +22,32 @@
 
 ---
 
-## Selftest Service (current main implementation)
+## 🚀 How to Setup, Configure, and Run the Demos
 
-We implemented and deployed a public, client-facing self-test service to evaluate whether mail clients can be coerced into plaintext authentication under STARTTLS disruption.
+Our project includes two practical tools developed to demonstrate and analyze STARTTLS downgrade vulnerabilities. Both serve as our main practical deliverables and can be run as demos.
 
-- **Public instance:** https://selftest.nsipmail.de
-- **Source code:** [`50-implementation/selftest-service/`](./50-implementation/selftest-service/)
+### 1. Selftest Service (Client-Side Testing Demo)
+We implemented a public, client-facing self-test service to evaluate whether mail clients can be coerced into plaintext authentication under STARTTLS disruption. This simulation provides a test without requiring client-side proxy setup or custom CA installation.
 
-Key capabilities:
+* **Live Demo:** [https://selftest.nsipmail.de](https://selftest.nsipmail.de) (Publicly available, no setup required)
+* **Source & Documentation:** [`50-implementation/selftest-service/`](./50-implementation/selftest-service/)
+* **How to run the demo:** 
+  1. Open the [WebUI](https://selftest.nsipmail.de).
+  2. Select **Guided mode** for a full 9-step evaluation, or **Advanced mode** for a specific testcase.
+  3. Configure your local email client (Thunderbird, Apple Mail, etc.) with the provided autodetect credentials or manual IMAP/SMTP ports.
+  4. Trigger a "Check mail" or "Send" action in your client.
+  5. The WebUI will instantly show whether your client successfully protected the credentials (`PASS`), sent them in plaintext (`FAIL`), or aborted safely (`INCONCLUSIVE`).
+* **Setup & Configuration (Self-Hosting):** If you want to deploy your own instance, follow the detailed setup instructions in the [Selftest Service README](./50-implementation/selftest-service/README.md#deployment-aws-ec2-example). It requires a Linux environment with standard mail ports (25, 143, 587, 465, 993) available.
 
-- **Guided mode (recommended):** step-by-step 9-step sequence (Baseline, Immediate T1–T4, Two-phase T1–T4)
-- **Advanced mode:** manual selection of testcase and scenario
-- **Outcome computation:** PASS/FAIL/INCONCLUSIVE (and SKIPPED in guided runs), with per-step log links
+### 2. Server Configuration Checker (Server-Side Audit Demo)
+A lightweight Bash script that audits active Postfix and Dovecot configurations to detect STARTTLS-related misconfigurations (e.g., allowing plaintext auth on unencrypted connections).
 
-Rationale (high level): simulation provides a public self-test without requiring client-side proxy setup or custom CA installation.
+* **Source & Documentation:** [`50-implementation/server-checker/`](./50-implementation/server-checker/)
+* **How to run the demo:**
+  1. Transfer the script to a Linux machine running Postfix and/or Dovecot (for example, our vulnerable test server documented in [`server-setup/`](./50-implementation/server-setup/)).
+  2. Execute the script: `./50-implementation/server-checker/server-checker-for-admin.sh`
+  3. The script will output a clear, human-readable report identifying insecure settings and provide exact recommendations on how to fix them.
+* **Setup & Configuration:** No external dependencies are needed, but it should be run with `sudo` to read the configuration output from `postconf` and `doveconf`. See the [Server Checker README](./50-implementation/server-checker/README.md) for JSON output options and more details.
 
 ## 📋 Repository Structure
 
@@ -251,4 +263,4 @@ Our project recreates and extends the research from the NDSS 2025 paper "A Multi
 
 ---
 
-*Last Updated: February 2026*
+*Last Updated: March 2026*

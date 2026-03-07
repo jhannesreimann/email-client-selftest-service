@@ -1,15 +1,32 @@
-# Mail Server STARTTLS Audit Script
+# Mail Server STARTTLS Audit Script (Server-Side Demo)
 
 A lightweight Bash audit script that checks **Postfix** and **Dovecot** configurations for common security misconfigurations related to **STARTTLS downgrade attacks**.
 
 The script inspects active configuration files and reports insecure settings along with fixes recommendations.
 
+## Setup & Configuration
 
-## Usage
+This tool is a standalone Bash script and requires no complex installation. 
 
-### console output mode
+**Requirements:**
+- A Linux environment running **Postfix** and/or **Dovecot**.
+- The script uses `postconf` and `doveconf` to read the active configuration, so it must be run with sufficient privileges (typically `sudo` or as `root`).
+
+**Installation:**
+Simply navigate to this directory and ensure the script is executable:
 ```bash
-./server-checker-for-admin.sh
+cd 50-implementation/server-checker
+chmod +x server-checker-for-admin.sh
+```
+
+## Running the Demo
+
+You can run this script on any mail server. If you want to see it detect vulnerabilities, run it on a deliberately vulnerable server (like the one described in [`../server-setup/`](../server-setup/)).
+
+### Console output mode (Default)
+Run the script to see a human-readable report:
+```bash
+sudo ./server-checker-for-admin.sh
 ```
 
 example output:
