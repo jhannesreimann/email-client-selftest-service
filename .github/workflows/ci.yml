@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install selftest service dependencies
+        run: pip install -r 50-implementation/selftest-service/requirements.txt
+
+      - name: Compile check Python sources
+        run: python -m py_compile 50-implementation/selftest-service/*.py
+
+      - name: Syntax check shell scripts
+        run: |
+          bash -n 50-implementation/server-checker/server-checker-for-admin.sh
+          bash -n 50-implementation/test-setup/*.sh
+          bash -n 50-implementation/selftest-service/demo/demo_dashboard.sh

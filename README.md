@@ -1,266 +1,111 @@
-# Network Security in Practice 2025 - Team 2
-## TLS & Email Security Project
-
-**Team Members:** Sofya & Jhannes  
-**Topic:** Email Auto-Detect Vulnerabilities and TLS Downgrade Attacks  
-**Weekly Meeting:** Monday: 13:30-14:00  
-**Supervisors:** Feng (G2.E-25) and Pejman (G2.E-35)
-
-### 📊 Current Project Status
-
-| Phase | Component | Status | Details |
-|-------|-----------|--------|---------|
-| **I** | Literature Review | ✅ Complete | NDSS 2025 paper analyzed |
-| **I** | Server Infrastructure | ✅ Operational | AWS EC2 @ mail.nsipmail.de |
-| **I** | MITM Framework | ✅ Ready | Test cases T1-T4 integrated |
-| **I** | Manual Client Testing with Proxy | ✅ Complete | First results in `60-findings/` |
-| **I** | Selftest Service implementation | ✅ Complete | in `50-implementation/selftest-service` |
-| **II** | Attack Demonstrations with Selftest Service | ✅ Complete | first Demo during Intermediate presentation |
-| **II** | Certificate Tests | Cancelled | Focused on practical user-orieted testing service instead |
-| **II** | Configuration scanner for email server admins | ✅ Complete | in `50-implementation/server-checker` |
-| **II** | Final presentation & Demo | ✅ Complete | in `00-deliverables` |
-
----
-
-## 🚀 How to Setup, Configure, and Run the Demos
-
-Our project includes two practical tools developed to demonstrate and analyze STARTTLS downgrade vulnerabilities. Both serve as our main practical deliverables and can be run as demos.
-
-### 1. Selftest Service (Client-Side Testing Demo)
-We implemented a public, client-facing self-test service to evaluate whether mail clients can be coerced into plaintext authentication under STARTTLS disruption. This simulation provides a test without requiring client-side proxy setup or custom CA installation.
-
-* **Live Demo:** [https://selftest.nsipmail.de](https://selftest.nsipmail.de) (Publicly available, no setup required)
-* **Source & Documentation:** [`50-implementation/selftest-service/`](./50-implementation/selftest-service/)
-* **How to run the demo:** 
-  1. Open the [WebUI](https://selftest.nsipmail.de).
-  2. Select **Guided mode** for a full 9-step evaluation, or **Advanced mode** for a specific testcase.
-  3. Configure your local email client (Thunderbird, Apple Mail, etc.) with the provided autodetect credentials or manual IMAP/SMTP ports.
-  4. Trigger a "Check mail" or "Send" action in your client.
-  5. The WebUI will instantly show whether your client successfully protected the credentials (`PASS`), sent them in plaintext (`FAIL`), or aborted safely (`INCONCLUSIVE`).
-* **Setup & Configuration (Self-Hosting):** If you want to deploy your own instance, follow the detailed setup instructions in the [Selftest Service README](./50-implementation/selftest-service/README.md#deployment-aws-ec2-example). It requires a Linux environment with standard mail ports (25, 143, 587, 465, 993) available.
-
-### 2. Server Configuration Checker (Server-Side Audit Demo)
-A lightweight Bash script that audits active Postfix and Dovecot configurations to detect STARTTLS-related misconfigurations (e.g., allowing plaintext auth on unencrypted connections).
-
-* **Source & Documentation:** [`50-implementation/server-checker/`](./50-implementation/server-checker/)
-* **How to run the demo:**
-  1. Transfer the script to a Linux machine running Postfix and/or Dovecot (for example, our vulnerable test server documented in [`server-setup/`](./50-implementation/server-setup/)).
-  2. Execute the script: `./50-implementation/server-checker/server-checker-for-admin.sh`
-  3. The script will output a clear, human-readable report identifying insecure settings and provide exact recommendations on how to fix them.
-* **Setup & Configuration:** No external dependencies are needed, but it should be run with `sudo` to read the configuration output from `postconf` and `doveconf`. See the [Server Checker README](./50-implementation/server-checker/README.md) for JSON output options and more details.
-
-## 📋 Repository Structure
-
-This repository is organized to facilitate project management, documentation, and deliverable tracking throughout the NSIP course. Each directory serves a specific purpose in our workflow.
-
-### 📂 `00-deliverables/`
-**Purpose:** Final and intermediate deliverables for submission
-
-**Contents:**
-- Presentation slides (Lightning Talk, Phase I, Phase II)
-- Final technical report
-- Demo materials and recordings
-- Implementation packages
-- Any submission-ready materials
-
-**Key Dates:**
-- 08.12.2025: Lightning Talk (without slides)
-- 12.01.2026: Intermediate Presentation (Phase I)
-- 16.02.2026: Final Presentation (Phase II)
-- 29.03.2026: Final Deliverables Submission Deadline
-
----
-
-### 📂 `10-planning/`
-**Purpose:** Project planning, task management, and milestone tracking
-
-**Contents:**
-- Project timeline and Gantt charts
-- Task assignments and responsibilities
-- Meeting schedules and agendas
-- Risk assessment and mitigation strategies
-- Research questions and objectives
-- Implementation roadmap
-
-**Note:** Regular updates to planning documents demonstrate active project management (evaluated as part of the Technical Report - 20%)
-
----
-
-### 📂 `20-protocol/`
-**Purpose:** Meeting notes, progress documentation, and activity logs
-
-**Contents:**
-- Weekly meeting notes (with supervisors)
-- Internal team meeting protocols
-- Progress reports and status updates
-- Decision logs and rationale
-- Q&A documentation from supervisor meetings
-- Issue tracking and resolution notes
-
-**Note:** Documentation of progress is one of the measurements to evaluate seminar activities
-
----
-
-### 📂 `30-summary/`
-**Purpose:** Summaries of research findings, literature reviews, and technical insights
-
-**Contents:**
-- Literature review summaries
-- Research paper analyses
-- Technical concept summaries (TLS protocols, cryptography, implementations)
-- Experiment results and observations
-- Best practices and lessons learned
-- Architecture and design documentation
-
----
-
-### 📂 `40-references/`
-**Purpose:** Bibliographic references and resource management
-
-**Contents:**
-- BibTeX file (`.bib`) for all references
-- PDF copies of papers and articles
-- Links to useful resources
-- Citation notes and annotations
-- Research materials organized by topic
-
-**Reference Management:**
-- Use [JabRef](http://www.jabref.org/) for managing references
-- Follow proper citation formats (inproceedings for papers, article for journals, etc.)
-- Name sources clearly for easy reference
-- Document all external resources used in the project
-
----
-
-### 📂 `50-implementation/`
-**Purpose:** Practical implementation work, server setup, and attack scripts
-
-**Current Status:**
-- ✅ **Email Server Operational:** AWS EC2 instance deployed at `mail.nsipmail.de` (13.62.95.49)
-  - Postfix + Dovecot configured with vulnerable settings
-  - I-TLS ports: 993 (IMAPS), 995 (POP3S), 465 (SMTPS)
-  - O-TLS/STARTTLS ports: 143 (IMAP), 110 (POP3), 587 (SMTP)
-  - Valid Let's Encrypt certificates installed
-  - Plaintext authentication verified (`disable_plaintext_auth = no`)
-
-- ✅ **Public Selftest Service Operational:** `selftest.nsipmail.de`
-  - Guided and advanced workflows for testing T1–T4-like STARTTLS disruptions
-  - Source: [`50-implementation/selftest-service/`](./50-implementation/selftest-service/)
-  
-- ✅ **MITM Scripts Ready:** Original research code from paper authors
-  - Test cases T1-T4 for SMTP, IMAP, POP3 (STARTTLS downgrade attacks)
-  - TLS version downgrade PoC scripts
-  - mitmproxy integration modules prepared
-  
-- 🔄 **Client Testing:** Environment setup in progress
-  - mitmproxy installation and network configuration
-  - Test client selection and setup
-  - Initial test runs pending
-
-**Project Context:**
-- Recreating research from "A Multifaceted Study on the Use of TLS and Auto-detect in Email Ecosystems" (NDSS 2025)
-- Original code repositories integrated:
-  - https://github.com/tls-downgrade/email-security (Test Cases T1-T4)
-  - https://github.com/tls-downgrade/tls-downgrade (Version Downgrade PoC)
-
-**Detailed Documentation:** See [`50-implementation/README.md`](./50-implementation/README.md) and [`50-implementation/server-setup/README.md`](./50-implementation/server-setup/README.md)
-
-**Note:** This directory directly contributes to the **Practice (Implementation)** evaluation component (10% in Phase I, 20% in Phase II)
-
----
-
-### 📂 `60-findings/`
-**Purpose:** Structured documentation of test results and vulnerabilities
-
-**Current Contents:**
-- **Thunderbird (Kali Linux):**
-  - T1 (STARTTLS Stripping) results for IMAP & SMTP
-  - Detailed logs and security assessment
-- **Shodan passive measurement (mail TLS / STARTTLS indicators):**
-  - Plots and reproduction instructions in `60-findings/shodan-plots/`
-  - Scripts to generate stats and render plots under `60-findings/shodan-plots/`
-- **Planned:**
-  - Results for other clients (K-9 Mail, Apple Mail, etc.)
-  - Comparative analysis table
-
----
-
-## 📊 Evaluation Breakdown
-
-### Intermediate (40%)
-- **Gather Together Talk:** 10%
-- **Presentation (research):** 20%
-- **Practice (implementation):** 10%
-
-### Final (40%)
-- **Presentation (design + architecture + experiments + analysis):** 20%
-- **Practice (implementation):** 20%
-
-### Technical Report (20%)
-- Project management, final deliverable, report, documentation
-
-**Bonus:** Active participation, creative/innovative ideas, and successful implementations
-
----
-
-## 🔗 Useful Resources
-
-### Course Information
-- [Administrative Repository](https://gitlab.hpi.de/seceng/studentspace/nsip-2025/administrative)
-- [HPI Teaching Page - NSIP2025](https://hpi.de/meinel/lehrstuhl/team/senior-researcher/feng-cheng/teaching-activities/nsip2526.html)
-
-### Writing Guidelines
-- [Prof. Naumann's Scientific Writing Hints](https://hpi.de/naumann/people/felix-naumann/writing.html)
-- [Prof. Polze's Thesis Writing Tips](https://osm.hpi.de/theses/tipps)
-
-### Security Resources
-- [MITRE ATT&CK Framework](https://attack.mitre.org/)
-- [OWASP Vulnerability Classification](https://www.owasp.org/index.php/Vulnerability_Classification_Mappings)
-- [Splunk Security Research](https://research.splunk.com/detections/)
-- [DetectionLab](https://detectionlab.network/)
-
-### Top Security Conferences
-- [ACM CCS](https://www.sigsac.org/ccs.html) - [DBLP](https://dblp.org/db/conf/ccs/index.html)
-- [IEEE S&P](https://www.ieee-security.org/TC/SP-Index.html) - [DBLP](https://dblp.org/db/conf/sp/index.html)
-- [USENIX Security](https://www.usenix.org/conferences/byname/108) - [DBLP](https://dblp.org/db/conf/uss/index.html)
-- [NDSS](https://www.ndss-symposium.org/) - [DBLP](https://dblp.org/db/conf/ndss/index.html)
-- [ACSAC](https://www.acsac.org/) - [DBLP](https://dblp.org/db/conf/acsac/index.html)
-
-### Online Courses
-- [Missing Semester](https://missing.csail.mit.edu/2020/) / [Hacker Tools](https://hacker-tools.github.io/course-overview/)
-- [MIT Computer Systems Security](https://css.csail.mit.edu/6.858/2020/)
-
-### Security Talks
-- [CCC Media](https://media.ccc.de/)
-- [Black Hat](https://www.youtube.com/c/BlackHatOfficialYT/) / [Archive](https://www.blackhat.com/html/bh-media-archives/bh-multi-media-archives.html)
-- [DEF CON](https://media.defcon.org/)
-
----
-
-## 🎯 Project Topic: TLS & Email Security
-
-### Research Focus
-**Email Auto-Detect Vulnerabilities and TLS Downgrade Attacks**
-
-Our project recreates and extends the research from the NDSS 2025 paper "A Multifaceted Study on the Use of TLS and Auto-detect in Email Ecosystems." We investigate security vulnerabilities in email clients' auto-detect features that allow attackers to strip TLS encryption and capture credentials in plaintext.
-
-### Key Research Questions
-1. Are current (2025/2026) email client versions still vulnerable to STARTTLS downgrade attacks?
-2. How do different clients implement auto-detect, and which implementation patterns are most vulnerable?
-3. What certificate validation weaknesses exist in popular email clients?
-4. How do real-world setup guides (e.g., HPI documentation) impact user security?
-
----
-
-## 📝 Working Practices
-
-1. **Document Everything:** Keep detailed notes in `20-protocol/` for all meetings and decisions
-2. **Update Regularly:** Maintain progress documentation to demonstrate ongoing work
-3. **Organize References:** Use `40-references/` systematically with proper citations
-4. **Plan Iteratively:** Update `10-planning/` as the project evolves
-5. **Track Implementation:** Document all setup steps, configurations, and test results in `50-implementation/`
-6. **Prepare Deliverables Early:** Use `00-deliverables/` to stage materials before deadlines
-
----
-
-*Last Updated: March 2026*
+# email-client-selftest-service
+
+A university project from the HPI seminar Network Security in Practice (NSIP), winter term 2025/26, supervised by Feng and Pejman. Built by Team 2: Sofya and Jhannes.
+
+**Status:** coursework, finished in March 2026 and no longer maintained. The public demo instance at `selftest.nsipmail.de` was shut down after the course ended. Everything here still works if you host it yourself.
+
+## Why this exists
+
+Most mail clients try to guess account settings automatically. You enter an email address and a password, the client probes candidate servers and connects with STARTTLS or implicit TLS, depending on what each server claims to offer. An attacker on the same network can interfere with that negotiation: strip STARTTLS from the capability list, accept the command and then drop the connection, reject it outright, or break the session right after the handshake. What happens next depends on the client. A careful one aborts and warns you. A careless one falls back to plaintext authentication and hands your password to whoever is listening.
+
+That is roughly the setup of the NDSS 2025 paper [A Multifaceted Study on the Use of TLS and Auto-detect in Email Ecosystems](https://dx.doi.org/10.14722/ndss.2025.240532). We spent a semester recreating parts of that work and building our own tooling on top of it.
+
+## What we built
+
+Two tools came out of this, plus a pile of lab infrastructure.
+
+### Selftest service (`50-implementation/selftest-service`)
+
+The main deliverable. The paper's methodology needs a man-in-the-middle proxy between client and server, which is not something you can ask an ordinary user to install. So we turned the setup around. Instead of attacking the connection, we run a deliberately misbehaving mail server and let people point their own clients at it. No proxy, no certificates to import.
+
+It has two parts:
+
+- `selftest_server.py`, written against the Python standard library only. Minimal SMTP and IMAP endpoints on the standard mail ports (25, 143, 465, 587, 993) that can act in five ways: a normal `baseline`, plus four disruption patterns matching the paper's test cases T1-T4. In test modes it also refuses the implicit TLS ports, so clients fall back to the STARTTLS ports where the interesting decisions happen.
+- `webui.py`, a small FastAPI app. Start a session in the browser, get credentials like `test-a1b2c3@<domain>`, configure your mail client with them, trigger a send or receive, and watch what your client actually did. Sessions are derived from the username and stored per public IP with a TTL.
+
+Each step ends in a verdict: PASS means authentication happened inside TLS, FAIL means your client authenticated without TLS, INCONCLUSIVE means no auth attempt was observed, WARN means the client noticed something and asked you what to do. Events are logged without passwords.
+
+### Server checker (`50-implementation/server-checker`)
+
+A single Bash script for mail server admins. It reads the active Postfix and Dovecot configuration via `postconf` and `doveconf` and reports settings that make downgrade attacks possible, such as `smtpd_tls_security_level = may` or Dovecot's `disable_plaintext_auth = no`. Every finding comes with the recommended fix. Output is human readable by default, JSON with `-o`.
+
+### Lab infrastructure and research material
+
+- `50-implementation/mitm-scripts/` contains the original attack scripts from the paper authors ([email-security](https://github.com/tls-downgrade/email-security), [tls-downgrade](https://github.com/tls-downgrade/tls-downgrade)), vendored with light modifications.
+- `50-implementation/server-setup/` documents the deliberately vulnerable Postfix/Dovecot target we ran on AWS during the course, down to the exact settings that made plaintext auth possible.
+- `50-implementation/test-setup/` has network namespace and iptables scripts that routed a local Thunderbird through mitmproxy transparently.
+- `60-findings/` holds results: a per-client vulnerability matrix and a passive Shodan measurement of how common risky server configurations look from the outside.
+- `00-deliverables/` through `40-references/` is course paperwork: slides, the final report, meeting protocols, planning notes and paper summaries.
+
+## Running the selftest service locally
+
+Linux with root access (ports below 1024 need privileges) and Python 3.10 or newer.
+
+```bash
+cd 50-implementation/selftest-service
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+# throwaway certificate, fine for local poking around;
+# real clients will not trust it without extra convincing
+openssl req -x509 -newkey rsa:2048 -nodes -days 30 \
+  -keyout key.pem -out cert.pem -subj "/CN=localhost"
+
+# terminal 1: the mail server (root because of the default ports)
+sudo .venv/bin/python selftest_server.py \
+  --tls-cert cert.pem --tls-key key.pem \
+  --mode-store /tmp/selftest/mode.json \
+  --log /tmp/selftest/events.jsonl
+
+# terminal 2: the web UI
+.venv/bin/python webui.py \
+  --store /tmp/selftest/mode.json \
+  --events /tmp/selftest/events.jsonl
+```
+
+Open http://127.0.0.1:9000, start a session, and configure any mail client with the credentials shown. Thunderbird is what we tested with.
+
+For anything beyond local poking you want a VM with public DNS records and a real certificate, because client behavior differs depending on what they trust. The full self-hosting walkthrough, including systemd units and nginx config, is in the [selftest service README](50-implementation/selftest-service/README.md).
+
+### Server checker
+
+Run it on a machine with Postfix and/or Dovecot installed:
+
+```bash
+cd 50-implementation/server-checker
+chmod +x server-checker-for-admin.sh
+sudo ./server-checker-for-admin.sh              # report in the terminal
+sudo ./server-checker-for-admin.sh -o out.json  # JSON instead
+```
+
+On a hardened server it finds nothing. On our deliberately vulnerable target it flagged every hole we had drilled.
+
+## What we found
+
+Short version: Thunderbird 140 ESR on Linux held up well under manual configuration. Across the four disruption patterns on IMAP, SMTP and POP3, most combinations were handled safely. Two cases landed on "user dependent": Thunderbird notices that something is wrong and warns, but suggests actions like turning off security settings that would leak credentials if the user follows them. Logs and details are in `60-findings/client/`.
+
+The Shodan side asked how often internet-facing mail servers advertise AUTH before TLS is established. Under one query profile, roughly half of the observed submission services on port 587 did. Banner-based heuristics prove nothing on their own, but the numbers suggest the server-side misconfiguration this project relies on is far from exotic. Plots and reproduction scripts are in `60-findings/server/shodan-plots/`.
+
+## Known limitations
+
+- The session override in the WebUI is stored per public IP, so two people behind the same NAT cannot test at the same time.
+- We only tested Thunderbird on Linux in depth. The other rows of the matrix were never filled in.
+- The service simulates a misbehaving server instead of intercepting traffic, so its T1-T4 modes approximate the paper's scenarios rather than reproducing them exactly. Design notes on that are in `50-implementation/selftest-service/PAPER_PARITY_AND_NEXT_STEPS.md`.
+- POP3 support exists in the vendored scripts but was deprioritized early on.
+- Nothing here is maintained. If you break it, you get to keep both halves.
+
+## Repository layout
+
+| Directory | Contents |
+|---|---|
+| `00-deliverables/` | Slides and the final report submitted for grading |
+| `10-planning/` | Project plans, progress tracking, design sketches |
+| `20-protocol/` | Weekly supervisor meeting notes |
+| `30-summary/` | Summaries of related papers |
+| `40-references/` | The literature itself |
+| `50-implementation/` | Both tools, lab documentation, vendored attack scripts |
+| `60-findings/` | Test results and measurements |
+
+## License
+
+MIT, see [LICENSE](LICENSE).

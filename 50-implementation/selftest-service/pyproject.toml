@@ -1,0 +1,10 @@
+[project]
+name = "selftest-service"
+version = "1.0.0"
+description = "Client-facing service that checks whether a mail client leaks credentials under STARTTLS disruption"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi==0.110.0",
+    "uvicorn==0.29.0",
+]

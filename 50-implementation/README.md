@@ -1,50 +1,18 @@
-# Implementation & Setup
+# Implementation
 
-This directory contains all practical implementation work for the project. 
+The practical part of the project, as opposed to the paperwork in the numbered folders around it. The [root README](../README.md) has the big picture.
 
-Our main deliverables are packaged as easy-to-run tools. For high-level instructions on how to run these as demos, please see the [Main README](../README.md#🚀-how-to-setup-configure-and-run-the-demos).
+## Tools
 
-## 🚀 Main Deliverables (Demos)
+- [`selftest-service/`](./selftest-service/): the client-facing self-test service. A Python SMTP/IMAP server that misbehaves on purpose (baseline plus the paper's T1-T4 disruption patterns) and a FastAPI WebUI that runs test sessions and computes verdicts. Run instructions and a full self-hosting walkthrough are in [its README](./selftest-service/README.md).
+- [`server-checker/`](./server-checker/): a Bash script for mail server admins. It audits active Postfix/Dovecot configurations for settings that allow plaintext auth or make STARTTLS stripping possible. No install needed: download, `chmod +x`, run with sudo. Details in [its README](./server-checker/README.md).
 
-1. **[Selftest Service (`selftest-service/`)](./selftest-service/)**
-   * A client-facing web service to test email clients against STARTTLS downgrade attacks without requiring a local proxy.
-   * **Setup/Config:** See [`selftest-service/README.md`](./selftest-service/README.md) for AWS deployment instructions.
-   * **Run:** Available publicly at https://selftest.nsipmail.de.
+## Lab infrastructure (historical)
 
-2. **[Server Configuration Scanner (`server-checker/`)](./server-checker/)**
-   * A bash script for mail server administrators to audit Postfix/Dovecot configurations for downgrade vulnerabilities.
-   * **Setup/Config:** No installation required, just download and run as root on the mail server.
-   * **Run:** `./server-checker/server-checker-for-admin.sh`
+Everything below was live during the course (October 2025 to March 2026). The AWS instances behind it are gone, so these directories document what we did rather than anything still running.
 
----
+- [`server-setup/`](./server-setup/): how we built the deliberately vulnerable Postfix/Dovecot target (`mail.nsipmail.de`) used for manual client testing.
+- [`mitm-scripts/`](./mitm-scripts/): the original T1-T4 attack scripts from the NDSS 2025 paper authors, plus their TLS version downgrade PoC. Used with mitmproxy for the tests recorded in [`60-findings/client/`](../60-findings/client/).
+- [`test-setup/`](./test-setup/): network namespaces and iptables rules that routed a local Thunderbird through mitmproxy transparently.
 
-## 🛠️ Infrastructure & Manual Testing
-
-The following directories contain the underlying infrastructure and manual testing scripts used during our research phase:
-
-* **`server-setup/`**: Documentation on how we configured our vulnerable target mail server (`mail.nsipmail.de`). See [`server-setup/README.md`](./server-setup/README.md).
-* **`mitm-scripts/`**: The original attack scripts from the NDSS 2025 paper.
-* **`test-setup/`**: Various test configurations.
-
-### Target Server Access
-- **SSH:** `ssh ubuntu@13.62.95.49` (key-based auth)
-- **Test Account:** `testuser@nsipmail.de` / `password123`
-- **Logs:** `/var/log/mail.log` (Postfix/Dovecot)
-
-### Manual Server Verification
-You can manually verify the server vulnerability (plaintext auth allowed on port 587) using telnet:
-```bash
-telnet mail.nsipmail.de 587
-EHLO test.com
-# Should show: 250-AUTH PLAIN LOGIN (without TLS!)
-AUTH PLAIN AHRlc3R1c2VyAHBhc3N3b3JkMTIz
-# Should respond: 235 2.7.0 Authentication successful
-```
-
-### Manual MITM Testing Methodology (Legacy)
-Before developing the Selftest Service, we used the following manual process with mitmproxy:
-1. Configure client network to route through mitmproxy
-2. Use "Auto-Detect" or "Manual" feature to configure account
-3. Run test cases T1-T4
-4. Capture traffic logs and authentication attempts
-5. Document: Does client send credentials in plaintext?
+For context on how we got from the proxy-based setup to the public self-test service, see the idea sketch in [`10-planning/client-self-test-idea.md`](../10-planning/client-self-test-idea.md) and the design notes in [`selftest-service/PAPER_PARITY_AND_NEXT_STEPS.md`](./selftest-service/PAPER_PARITY_AND_NEXT_STEPS.md). The short version: asking users to install mitmproxy and redirect their traffic was a non-starter for a public tool, so we simulated the misbehaving server instead.

@@ -2,11 +2,13 @@
 
 This folder contains a **public self-test service** that helps determine whether a mail client can be coerced into **plaintext authentication** under STARTTLS disruption/downgrade-like conditions.
 
-It is intended as a **server-side, client-facing self-test** (no local proxy / no mitmproxy on the user’s machine).
+It is intended as a **server-side, client-facing self-test** (no local proxy / no mitmproxy on the user's machine).
+
+> **Status:** this service ran publicly at `selftest.nsipmail.de` during the course (winter term 2025/26). That instance has been shut down. To use the tool today, deploy your own copy; see [Deployment](#deployment-aws-ec2-example) below, or the quick local run in the [root README](../../README.md#running-the-selftest-service-locally). The URLs and paths in this document refer to a self-hosted instance.
 
 ## What this is / what this is not
 
-- **This is:** a small Python SMTP/IMAP service that can switch behavior between testcases (`baseline`, `t1`–`t4`) based on a mode store, plus a WebUI to start sessions and view results.
+- **This is:** a small Python SMTP/IMAP service that can switch behavior between testcases (`baseline`, `t1`-`t4`) based on a mode store, plus a WebUI to start sessions and view results.
 - **This is not:** the original local reproduction setup (mitmproxy-based) used for deeper protocol-level experiments.
 - **This is not:** a real mailbox or mail relay. It does not deliver mail or provide mail storage.
 
@@ -44,7 +46,7 @@ Notes:
 
 - Ports `<1024` require root or capabilities.
 - The server logs `server_port` per event so you can see which port the client used.
-- In test modes `t1`–`t4`, the server intentionally **blocks implicit TLS** endpoints (`IMAPS 993`, `SMTPS 465`) by disconnecting immediately. This forces clients that prefer implicit TLS to retry on STARTTLS ports so the downgrade decision points are observable (paper-style behavior).
+- In test modes `t1`-`t4`, the server intentionally **blocks implicit TLS** endpoints (`IMAPS 993`, `SMTPS 465`) by disconnecting immediately. This forces clients that prefer implicit TLS to retry on STARTTLS ports so the downgrade decision points are observable (paper-style behavior).
 
 ## Modes (testcases)
 
@@ -95,7 +97,7 @@ Important limitation:
 
 Guided mode runs a fixed 9-step sequence and tells the user exactly what to do per testcase.
 
-- Open: `https://selftest.nsipmail.de/guided`
+- Open the guided view (`/guided`) on your instance.
 - Follow the instructions for each step.
 - Use the shown **Email** / **Username** / **Password** in your mail client.
   - The UI provides small copy-to-clipboard buttons next to values.
@@ -111,13 +113,13 @@ Notes:
 
 If you want to test a single testcase only:
 
-- Open: `https://selftest.nsipmail.de/?view=advanced` (or pick a scenario from `/`)
-- Choose a mode (`baseline`, `t1`–`t4`) and scenario (`immediate` / `two_phase`).
+- Open the advanced view (`/?view=advanced`) on your instance, or pick a scenario from the front page.
+- Choose a mode (`baseline`, `t1`-`t4`) and scenario (`immediate` / `two_phase`).
 - Start a session and open the status page.
 
 ### 1) Start a session
 
-- Open the WebUI (e.g. `https://selftest.nsipmail.de/`).
+- Open the WebUI.
 - Choose a testcase mode.
 - The UI shows:
   - email address (`test-SESSION@<autodetect domain>`) for autodetect,
@@ -135,7 +137,7 @@ Recommended (STARTTLS test):
 
 Note:
 
-- In test modes `t1`–`t4`, the service intentionally disconnects implicit TLS ports (`993`/`465`) so clients fall back to STARTTLS ports.
+- In test modes `t1`-`t4`, the service intentionally disconnects implicit TLS ports (`993`/`465`) so clients fall back to STARTTLS ports.
 
 ### 3) Trigger events
 
